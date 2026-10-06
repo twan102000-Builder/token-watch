@@ -2,33 +2,34 @@
 
 **Active Token Monitoring and Reduction Advisement System for Multi-Node, Multi-Agent Home Networks.**
 
-Token Watch provides distributed telemetry, real-time token budgeting, prompt slot decomposition, and active reduction advisories across edge nodes, local inference servers (Ollama, vLLM), and cloud LLM gateways.
+Token Watch provides distributed telemetry, real-time token budgeting, prompt slot decomposition, active reduction advisories, and runtime optimizations across edge nodes (RPi, Mini-PCs), local inference runtimes (vLLM, Ollama), and cloud LLM gateways.
 
 ---
 
 ## 🌟 Key Features
 
-1. **Distributed Sidecar Proxies**:
-   - Zero-overhead ASGI / reverse-proxy interceptors per node (RPi, Mini-PCs, GPU rigs).
-   - Ingests streaming usage metrics with node, agent, and task attribution headers.
+1. **Production-Ready Streaming Sidecar Proxies**:
+   - Zero-overhead ASGI / reverse-proxy interceptors per node with full SSE streaming (`stream: true`) passthrough.
+   - Offline disk spooling (SQLite WAL buffer) on edge nodes for zero-loss telemetry during network disconnects.
+   - Automated response `tool_calls` extraction and provider-native usage ingestion (`cached_tokens`).
 
-2. **Prompt Slot Decomposition**:
-   - Deconstructs LLM payload tokens into discrete semantic components:
-     - `system_instructions`
-     - `tool_schemas`
-     - `iot_telemetry`
-     - `conversation_history`
-     - `task_payload`
+2. **Active Optimization & Runtime Interception**:
+   - **Dynamic Tool Pruner**: Ranks tools using query-keyword scoring and strips dormant tool schemas prior to upstream inference.
+   - **Prefix Cache Stabilizer**: Reorders prompt structures to place static instructions and schemas before dynamic variables, locking in 80%+ prompt caching.
+   - **Telemetry Compactor**: Converts repetitive, static IoT state tables into state-change diffs.
 
-3. **Active Advisement Engine**:
-   - **Cache Alignment Auditor**: Identifies prefix jitter to unlock 80%+ prompt caching.
-   - **Dormant Tool Pruner**: Highlights unused tool definitions polluting context.
-   - **Telemetry Delta Compactor**: Detects repetitive sensor state dumps and suggests diff-based delta ingestion.
-   - **Multi-Agent Ping-Pong Breaker**: Real-time loop detection and circuit breaker.
+3. **Time-Series Analytics & Advisory Engine**:
+   - Embedded **DuckDB** storage engine with sub-millisecond query aggregation.
+   - **Dormant Tool Pruner Advisor**: Flags unused tool schemas polluting context.
+   - **Multi-Agent Ping-Pong Breaker**: Detects recursive inter-agent chatter loops and triggers circuit breakers.
+   - **Model Cascading Advisor**: Recommends routing low-complexity agent tasks to faster, cheaper models.
 
-4. **Multi-Model Cost & Quota Management**:
-   - Per-agent, per-node sliding-window token budgets.
-   - Unified pricing matrix for Cloud (Anthropic, Gemini, OpenAI) and Local models.
+4. **Unified Multi-Model Cost Matrix**:
+   - Calculates exact USD cost across Anthropic (Claude 3.5 Sonnet/Haiku/Opus), OpenAI (GPT-4o, o1, o3-mini), Google Gemini (2.5 Flash, Pro), and Local Models (Llama 3, Qwen).
+   - Accurately discounts cached input tokens.
+
+5. **Terminal UI & Real-Time Dashboard**:
+   - Interactive live console dashboard built with Rich.
 
 ---
 
@@ -45,9 +46,10 @@ Token Watch provides distributed telemetry, real-time token budgeting, prompt sl
                                       │    TOKEN WATCH HUB    │
                                       │ ───────────────────── │
                                       │ • Slot Decomposer     │
+                                      │ • DuckDB Time-Series  │
                                       │ • Circuit Breakers    │
                                       │ • Advisory Engine     │
-                                      │ • Storage & Dashboard │
+                                      │ • Rich TUI Dashboard  │
                                       └───────────────────────┘
 ```
 
@@ -62,21 +64,40 @@ Token Watch provides distributed telemetry, real-time token budgeting, prompt sl
 git clone https://github.com/twan102000-Builder/token-watch.git
 cd token-watch
 
-# Install dependencies
-pip install -e .
+# Install dependencies (DuckDB, FastAPI, Uvicorn, Rich, Tiktoken)
+pip install -e ".[dev]"
 ```
 
-### Starting the Hub
+### 1. Starting the Central Hub
 
 ```bash
-python -m tokenwatch.hub
+python -m tokenwatch.hub --port 9000
 ```
 
-### Running a Node Sidecar
+### 2. Running a Node Sidecar
 
 ```bash
-# Intercepts requests on port 8080 and forwards to upstream target
-python -m tokenwatch.sidecar --port 8080 --upstream http://localhost:11434/v1 --node-id node_gpu
+# Intercepts requests on port 8080 and forwards to upstream target with active tool pruning enabled
+python -m tokenwatch.sidecar \
+  --port 8080 \
+  --upstream http://localhost:11434/v1 \
+  --hub-url http://localhost:9000 \
+  --node-id node_gpu_livingroom \
+  --optimize-tools
+```
+
+### 3. Launching the Real-Time Terminal Dashboard
+
+```bash
+python -m tokenwatch.cli dashboard --hub-url http://localhost:9000
+```
+
+---
+
+## 🧪 Running Tests
+
+```bash
+pytest -v tests/test_tokenwatch.py
 ```
 
 ---
