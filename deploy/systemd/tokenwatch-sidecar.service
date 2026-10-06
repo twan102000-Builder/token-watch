@@ -1,0 +1,15 @@
+[Unit]
+Description=Token Watch Edge Node Sidecar Interceptor
+After=network.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/opt/token-watch
+EnvironmentFile=/opt/token-watch/.env
+ExecStart=/opt/token-watch/.venv/bin/python -m tokenwatch.sidecar --port 8080 --upstream http://localhost:11434/v1 --hub-url http://192.168.1.100:9000 --node-id node_edge --optimize-tools
+Restart=always
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

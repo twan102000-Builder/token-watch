@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  tokenwatch-hub:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    container_name: tokenwatch-hub
+    restart: unless-stopped
+    ports:
+      - "9000:9000"
+    environment:
+      - TOKENWATCH_API_KEY=${TOKENWATCH_API_KEY:-local-secret-key}
+      - TOKENWATCH_HA_WEBHOOK_URL=${TOKENWATCH_HA_WEBHOOK_URL:-}
+    volumes:
+      - tokenwatch-data:/app/data
+
+volumes:
+  tokenwatch-data:

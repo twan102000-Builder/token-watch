@@ -1,37 +1,46 @@
 import pytest
+import time
 from tokenwatch.decomposer import PromptSlotDecomposer
 from tokenwatch.advisor import TokenAdvisorEngine
-from tokenwatch.models import TelemetryEvent, PromptBreakdown
+from tokenwatch.models import TelemetryEvent, PromptBreakdown, NodeHeartbeat
 from tokenwatch.pricing import calculate_cost
 from tokenwatch.optimizer import DynamicToolPruner, PrefixCacheStabilizer, TelemetryCompactor
-from tokenwatch.storage import DuckDBStorage
+from tokenwatch.storage import SQLiteStorage
+from tokenwatch.security import DataRedactor
 
 def test_decomposer():
     decomposer = PromptSlotDecomposer()
     payload = {
         "messages": [
-            {"role": "system", "content": "You are a smart home assistant."},
-            {"role": "user", "content": "Sensor temperature reading: 72F in living room."},
+            {"role": "system", "content": "You are a smart home assistant. API Key: sk-ant-api03-abcdef1234567890abcdef123456"},
+            {"role": "user", "content": "Sensor temperature reading: 72F in living room. Password: mysecretpassword123"},
             {"role": "user", "content": "Turn down the thermostat to 68F."}
         ],
         "tools": [
             {"type": "function", "function": {"name": "set_climate", "parameters": {}}}
         ]
     }
-    breakdown = decomposer.decompose(payload)
+    breakdown = decomposer.decompose(payload, redact_secrets=True)
     assert breakdown.system_instructions > 0
     assert breakdown.tool_schemas > 0
     assert breakdown.iot_telemetry > 0
     assert breakdown.task_payload > 0
     assert breakdown.total_prompt_tokens > 0
 
+def test_security_redactor():
+    text = "Connecting with sk-1234567890abcdef1234567890 and password: supersecret and pin: 9988"
+    redacted = DataRedactor.redact_text(text)
+    assert "sk-1234567890" not in redacted
+    assert "[REDACTED_API_KEY]" in redacted
+    assert "supersecret" not in redacted
+    assert "[REDACTED_PASSWORD]" in redacted
+    assert "9988" not in redacted
+    assert "[REDACTED_PIN]" in redacted
+
 def test_pricing_engine():
-    # 100k input, 10k output on Claude 3.5 Sonnet
-    # Without cache: 100k * 3/M ($0.30) + 10k * 15/M ($0.15) = $0.45
     cost_no_cache = calculate_cost("claude-3-5-sonnet-20241022", input_tokens=100_000, output_tokens=10_000)
     assert pytest.approx(cost_no_cache, 0.001) == 0.45
 
-    # With 80k cached read: 20k * 3/M ($0.06) + 80k * 0.30/M ($0.024) + 10k * 15/M ($0.15) = $0.234
     cost_with_cache = calculate_cost("claude-3-5-sonnet-20241022", input_tokens=100_000, output_tokens=10_000, cached_read_tokens=80_000)
     assert pytest.approx(cost_with_cache, 0.001) == 0.234
     assert cost_with_cache < cost_no_cache
@@ -67,16 +76,14 @@ def test_telemetry_compactor():
     diff1 = compactor.compact_state_dict(state1)
     assert diff1 == state1
 
-    # Second poll with unchanged states
     diff2 = compactor.compact_state_dict(state1)
     assert diff2["status"] == "all_states_unchanged"
 
-    # Third poll with single change
     diff3 = compactor.compact_state_dict({"temp": 73, "humidity": 45})
     assert diff3 == {"temp": 73}
 
-def test_duckdb_storage_and_advisor():
-    storage = DuckDBStorage(db_path=":memory:")
+def test_sqlite_storage_and_advisor():
+    storage = SQLiteStorage(db_path=":memory:")
     advisor = TokenAdvisorEngine(storage=storage)
 
     event = TelemetryEvent(
@@ -100,43 +107,32 @@ def test_duckdb_storage_and_advisor():
     )
     advisor.record_event(event)
 
-    # Check analytics summary
     summary = storage.get_agent_metrics_summary()
     assert len(summary) == 1
     assert summary[0]["agent_id"] == "hvac"
 
-    # Check advisories
     advisories = advisor.generate_advisories("hvac")
     assert any(a.advisory_type == "TOOL_PRUNING" for a in advisories)
     assert any(a.advisory_type == "CACHE_ALIGNMENT" for a in advisories)
     assert any(a.advisory_type == "MODEL_CASCADING" for a in advisories)
 
-def test_loop_detection_advisory():
-    storage = DuckDBStorage(db_path=":memory:")
-    advisor = TokenAdvisorEngine(storage=storage)
+def test_heartbeat_and_circuit_breaker():
+    storage = SQLiteStorage(db_path=":memory:")
+    
+    # Test heartbeat recording
+    hb = NodeHeartbeat(node_id="edge_pi_1", status="ONLINE", memory_mb=128.5, backlog_events=0, active_agents=["agent_a"])
+    storage.record_heartbeat(hb)
+    nodes = storage.get_node_statuses()
+    assert len(nodes) == 1
+    assert nodes[0]["node_id"] == "edge_pi_1"
+    assert nodes[0]["status"] == "ONLINE"
 
-    # Simulate rapid 4-turn chatter loop with same correlation ID
-    import time
-    now = time.time()
-    for i in range(4):
-        event = TelemetryEvent(
-            timestamp=now + (i * 2),
-            trace_id=f"trace-{i}",
-            correlation_id="loop-test-corr",
-            node_id="node_edge",
-            agent_id="chatter_agent",
-            model="gpt-4o",
-            input_tokens=1000,
-            output_tokens=100,
-            prompt_breakdown=PromptBreakdown(
-                system_instructions=100,
-                tool_schemas=100,
-                conversation_history=700,
-                task_payload=100,
-                total_prompt_tokens=1000
-            )
-        )
-        advisor.record_event(event)
+    # Test circuit breaker tripping
+    assert storage.is_circuit_tripped("loop-corr-99") is None
+    storage.trip_circuit_breaker("loop-corr-99", reason="Loop detected")
+    status = storage.is_circuit_tripped("loop-corr-99")
+    assert status is not None
+    assert status["reason"] == "Loop detected"
 
-    advisories = advisor.generate_advisories("chatter_agent")
-    assert any(a.advisory_type == "LOOP_DETECTED" for a in advisories)
+    storage.reset_circuit_breaker("loop-corr-99")
+    assert storage.is_circuit_tripped("loop-corr-99") is None

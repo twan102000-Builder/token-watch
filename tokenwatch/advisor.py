@@ -1,14 +1,15 @@
 from typing import List, Dict, Any, Optional
 from tokenwatch.models import TelemetryEvent, AdvisoryMessage
-from tokenwatch.storage import DuckDBStorage
+from tokenwatch.storage import SQLiteStorage
 
 class TokenAdvisorEngine:
     """
     Evaluates telemetry events across agents, nodes, and multi-agent correlation trees
     to generate actionable, high-impact token and cost reduction advisories.
+    Backed by 100% private, zero-external-dependency SQLite with WAL mode.
     """
-    def __init__(self, storage: Optional[DuckDBStorage] = None):
-        self.storage = storage or DuckDBStorage(db_path=":memory:")
+    def __init__(self, storage: Optional[SQLiteStorage] = None):
+        self.storage = storage or SQLiteStorage(db_path=":memory:")
 
     def record_event(self, event: TelemetryEvent):
         self.storage.save_event(event)
@@ -85,7 +86,6 @@ class TokenAdvisorEngine:
         # 4. Model Downgrade / Cascading Advisory
         expensive_models = ["claude-3-5-sonnet", "gpt-4o", "o1", "claude-3-opus"]
         if any(m in latest.model.lower() for m in expensive_models):
-            # If agent tasks are simple (short output, few tools or binary answers)
             avg_out = sum(e.output_tokens for e in recent_events[:10]) / max(1, len(recent_events[:10]))
             if avg_out < 60 and len(latest.tools_invoked) <= 1:
                 advisories.append(
@@ -101,22 +101,25 @@ class TokenAdvisorEngine:
                     )
                 )
 
-        # 5. Multi-Agent Ping-Pong Loop Detection
+        # 5. Multi-Agent Ping-Pong Loop Detection & Active Circuit Trip
         if latest.correlation_id:
             chain = [e for e in self.storage.get_recent_events(limit=20) if e.correlation_id == latest.correlation_id]
             if len(chain) >= 4:
-                # Check rapid succession
                 time_span = abs(chain[0].timestamp - chain[-1].timestamp)
                 if time_span < 60.0:
+                    trip_reason = f"Rapid multi-agent chatter loop detected: {len(chain)} turns in {round(time_span, 1)}s across correlation ID {latest.correlation_id}"
+                    # Trip circuit breaker in storage
+                    self.storage.trip_circuit_breaker(latest.correlation_id, trip_reason)
+                    
                     advisories.append(
                         AdvisoryMessage(
                             advisory_type="LOOP_DETECTED",
                             severity="CRITICAL",
                             agent_id=agent_id,
                             node_id=latest.node_id,
-                            summary=f"Rapid multi-agent chatter loop detected: {len(chain)} turns in {round(time_span, 1)}s across correlation ID {latest.correlation_id}.",
+                            summary=trip_reason,
                             estimated_savings_percent=90.0,
-                            recommendation="Trigger Circuit Breaker: force termination of recursive handoffs or inject exit directive.",
+                            recommendation="Circuit breaker TRIPPED: recursive handoffs halted. Requests on this correlation ID will be blocked.",
                             actionable_fix={"action": "circuit_breaker_trip", "correlation_id": latest.correlation_id}
                         )
                     )

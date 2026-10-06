@@ -40,3 +40,26 @@ class AdvisoryMessage(BaseModel):
     recommendation: str
     actionable_fix: Optional[Dict[str, Any]] = None
 
+class NodeHeartbeat(BaseModel):
+    node_id: str
+    timestamp: float = Field(default_factory=time.time)
+    status: str = "ONLINE"  # 'ONLINE', 'DEGRADED', 'OFFLINE'
+    ip_address: Optional[str] = None
+    memory_mb: float = 0.0
+    backlog_events: int = 0
+    active_agents: List[str] = Field(default_factory=list)
+
+class CircuitBreakerStatus(BaseModel):
+    correlation_id: Optional[str] = None
+    agent_id: Optional[str] = None
+    is_tripped: bool = False
+    reason: Optional[str] = None
+    tripped_at: Optional[float] = None
+
+class AlertPayload(BaseModel):
+    timestamp: float = Field(default_factory=time.time)
+    alert_type: str  # e.g. 'LOOP_TRIP', 'QUOTA_EXCEEDED', 'NODE_OFFLINE'
+    severity: str    # 'WARNING', 'CRITICAL'
+    title: str
+    message: str
+    details: Optional[Dict[str, Any]] = None

@@ -1,3 +1,4 @@
+import os
 import time
 import argparse
 import httpx
@@ -7,41 +8,56 @@ from rich.panel import Panel
 from rich.layout import Layout
 from rich.live import Live
 
+from tokenwatch.security import API_KEY_HEADER_NAME, get_configured_api_key
+
 console = Console()
 
-def generate_dashboard(hub_url: str) -> Layout:
+def generate_dashboard(hub_url: str, api_key: str = None) -> Layout:
     layout = Layout()
     layout.split_column(
         Layout(name="header", size=3),
-        Layout(name="main", ratio=1),
+        Layout(name="body", ratio=1),
         Layout(name="advisories", size=8)
     )
+    layout["body"].split_row(
+        Layout(name="agents", ratio=2),
+        Layout(name="nodes", ratio=1)
+    )
+
+    headers = {}
+    key = api_key or get_configured_api_key()
+    if key:
+        headers[API_KEY_HEADER_NAME] = key
 
     try:
-        with httpx.Client(timeout=2.0) as client:
+        with httpx.Client(timeout=2.0, headers=headers) as client:
             summary_resp = client.get(f"{hub_url.rstrip('/')}/api/v1/analytics/summary")
             summaries = summary_resp.json() if summary_resp.status_code == 200 else []
+
+            nodes_resp = client.get(f"{hub_url.rstrip('/')}/api/v1/nodes")
+            nodes = nodes_resp.json() if nodes_resp.status_code == 200 else []
 
             events_resp = client.get(f"{hub_url.rstrip('/')}/api/v1/analytics/events?limit=8")
             events = events_resp.json() if events_resp.status_code == 200 else []
     except Exception:
-        summaries, events = [], []
+        summaries, nodes, events = [], [], []
 
     # Header
     total_spend = sum(s.get("total_spend_usd", 0.0) for s in summaries)
     total_tokens = sum(s.get("total_input_tokens", 0) + s.get("total_output_tokens", 0) for s in summaries)
-    header_text = f"[bold cyan]Token Watch Telemetry Hub[/bold cyan] | [green]ONLINE[/green] | Total Spend: [yellow]${total_spend:.4f}[/yellow] | Total Tokens: [magenta]{total_tokens:,}[/magenta]"
+    online_nodes = len([n for n in nodes if n.get("status") == "ONLINE"])
+    header_text = f"[bold cyan]Token Watch Private Hub[/bold cyan] | Nodes Online: [green]{online_nodes}[/green] | Total Spend: [yellow]${total_spend:.4f}[/yellow] | Total Tokens: [magenta]{total_tokens:,}[/magenta]"
     layout["header"].update(Panel(header_text, style="blue"))
 
-    # Main: Agent Breakdown Table
+    # Agents Table
     table = Table(title="Agent Token Metrics", expand=True)
     table.add_column("Agent ID", style="cyan", no_wrap=True)
     table.add_column("Invocations", justify="right")
     table.add_column("Input Tokens", justify="right")
     table.add_column("Output Tokens", justify="right")
-    table.add_column("Cache Hit %", justify="right", style="green")
+    table.add_column("Cache %", justify="right", style="green")
     table.add_column("Spend (USD)", justify="right", style="yellow")
-    table.add_column("Avg Latency", justify="right")
+    table.add_column("Latency", justify="right")
 
     for s in summaries:
         cache_pct = f"{s.get('cache_hit_ratio', 0.0) * 100:.1f}%"
@@ -54,7 +70,24 @@ def generate_dashboard(hub_url: str) -> Layout:
             f"${s.get('total_spend_usd', 0.0):.4f}",
             f"{s.get('avg_latency_ms', 0.0):.0f} ms"
         )
-    layout["main"].update(table)
+    layout["body"]["agents"].update(table)
+
+    # Nodes Heartbeat Table
+    node_table = Table(title="Multi-Node Topology", expand=True)
+    node_table.add_column("Node ID", style="magenta")
+    node_table.add_column("Status")
+    node_table.add_column("Backlog", justify="right")
+    node_table.add_column("Ping", justify="right")
+
+    for n in nodes:
+        status_style = "green" if n.get("status") == "ONLINE" else "red"
+        node_table.add_row(
+            n.get("node_id", "-"),
+            f"[{status_style}]{n.get('status', 'UNKNOWN')}[/{status_style}]",
+            str(n.get("backlog_events", 0)),
+            f"{n.get('last_seen_seconds_ago', 0)}s ago"
+        )
+    layout["body"]["nodes"].update(node_table)
 
     # Advisories Panel
     adv_lines = []
@@ -75,12 +108,12 @@ def generate_dashboard(hub_url: str) -> Layout:
     layout["advisories"].update(Panel(adv_text, title="Active Advisories & Optimization Alerts", style="yellow"))
     return layout
 
-def run_dashboard(hub_url: str):
-    with Live(generate_dashboard(hub_url), refresh_per_second=1, screen=True) as live:
+def run_dashboard(hub_url: str, api_key: str = None):
+    with Live(generate_dashboard(hub_url, api_key), refresh_per_second=1, screen=True) as live:
         try:
             while True:
                 time.sleep(1)
-                live.update(generate_dashboard(hub_url))
+                live.update(generate_dashboard(hub_url, api_key))
         except KeyboardInterrupt:
             console.print("[yellow]Exiting Token Watch Dashboard.[/yellow]")
 
@@ -90,9 +123,10 @@ if __name__ == "__main__":
 
     dash_parser = subparsers.add_parser("dashboard", help="Start real-time TUI dashboard")
     dash_parser.add_argument("--hub-url", type=str, default="http://localhost:9000")
+    dash_parser.add_argument("--api-key", type=str, default=None)
 
     args = parser.parse_args()
     if args.command == "dashboard":
-        run_dashboard(args.hub_url)
+        run_dashboard(args.hub_url, args.api_key)
     else:
         parser.print_help()

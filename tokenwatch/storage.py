@@ -1,112 +1,156 @@
 import os
 import json
-import duckdb
+import sqlite3
+import time
+import uuid
 from typing import List, Optional, Dict, Any
-from tokenwatch.models import TelemetryEvent, PromptBreakdown, AdvisoryMessage
+from tokenwatch.models import TelemetryEvent, PromptBreakdown, AdvisoryMessage, NodeHeartbeat
 
-class DuckDBStorage:
-    def __init__(self, db_path: str = "data/tokenwatch.duckdb"):
-        if db_path != ":memory:":
+class SQLiteStorage:
+    """
+    100% private, self-contained embedded storage powered by Python's built-in sqlite3.
+    Uses Write-Ahead Logging (WAL) for high concurrency and zero external binary dependencies.
+    """
+    def __init__(self, db_path: str = "data/tokenwatch.db"):
+        self.is_memory = db_path == ":memory:"
+        if not self.is_memory:
             os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
-        self.conn = duckdb.connect(database=db_path)
+        self.db_path = db_path
+        self._mem_conn = sqlite3.connect(":memory:") if self.is_memory else None
+        if self._mem_conn:
+            self._mem_conn.row_factory = sqlite3.Row
         self._init_schema()
 
-    def _init_schema(self):
-        self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS telemetry_events (
-                trace_id VARCHAR PRIMARY KEY,
-                correlation_id VARCHAR,
-                timestamp DOUBLE,
-                node_id VARCHAR,
-                agent_id VARCHAR,
-                task_type VARCHAR,
-                model VARCHAR,
-                streaming BOOLEAN,
-                input_tokens INTEGER,
-                output_tokens INTEGER,
-                cached_read_tokens INTEGER,
-                cached_write_tokens INTEGER,
-                cost_usd DOUBLE,
-                latency_ms DOUBLE,
-                prompt_breakdown_json VARCHAR,
-                tools_declared_json VARCHAR,
-                tools_invoked_json VARCHAR,
-                raw_usage_json VARCHAR
-            );
-        """)
+    def _get_connection(self) -> sqlite3.Connection:
+        if self.is_memory and self._mem_conn:
+            return self._mem_conn
+        conn = sqlite3.connect(self.db_path, timeout=10.0)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode = WAL;")
+        conn.execute("PRAGMA synchronous = NORMAL;")
+        return conn
 
-        self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS advisories (
-                id VARCHAR DEFAULT uuid(),
-                timestamp DOUBLE,
-                advisory_type VARCHAR,
-                severity VARCHAR,
-                agent_id VARCHAR,
-                node_id VARCHAR,
-                summary VARCHAR,
-                estimated_savings_percent DOUBLE,
-                recommendation VARCHAR,
-                actionable_fix_json VARCHAR
-            );
-        """)
+    def _init_schema(self):
+        with self._get_connection() as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS telemetry_events (
+                    trace_id TEXT PRIMARY KEY,
+                    correlation_id TEXT,
+                    timestamp REAL,
+                    node_id TEXT,
+                    agent_id TEXT,
+                    task_type TEXT,
+                    model TEXT,
+                    streaming INTEGER,
+                    input_tokens INTEGER,
+                    output_tokens INTEGER,
+                    cached_read_tokens INTEGER,
+                    cached_write_tokens INTEGER,
+                    cost_usd REAL,
+                    latency_ms REAL,
+                    prompt_breakdown_json TEXT,
+                    tools_declared_json TEXT,
+                    tools_invoked_json TEXT,
+                    raw_usage_json TEXT
+                );
+            """)
+
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS advisories (
+                    id TEXT PRIMARY KEY,
+                    timestamp REAL,
+                    advisory_type TEXT,
+                    severity TEXT,
+                    agent_id TEXT,
+                    node_id TEXT,
+                    summary TEXT,
+                    estimated_savings_percent REAL,
+                    recommendation TEXT,
+                    actionable_fix_json TEXT
+                );
+            """)
+
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS node_heartbeats (
+                    node_id TEXT PRIMARY KEY,
+                    timestamp REAL,
+                    status TEXT,
+                    ip_address TEXT,
+                    memory_mb REAL,
+                    backlog_events INTEGER,
+                    active_agents_json TEXT
+                );
+            """)
+
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS tripped_circuits (
+                    circuit_key TEXT PRIMARY KEY, -- e.g. correlation_id or agent_id
+                    tripped_at REAL,
+                    reason TEXT
+                );
+            """)
 
     def save_event(self, event: TelemetryEvent):
-        self.conn.execute("""
-            INSERT OR REPLACE INTO telemetry_events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            event.trace_id,
-            event.correlation_id,
-            event.timestamp,
-            event.node_id,
-            event.agent_id,
-            event.task_type,
-            event.model,
-            event.streaming,
-            event.input_tokens,
-            event.output_tokens,
-            event.cached_read_tokens,
-            event.cached_write_tokens,
-            event.cost_usd,
-            event.latency_ms,
-            event.prompt_breakdown.model_dump_json(),
-            json.dumps(event.tools_declared),
-            json.dumps(event.tools_invoked),
-            json.dumps(event.raw_usage) if event.raw_usage else None
-        ))
+        with self._get_connection() as conn:
+            conn.execute("""
+                INSERT OR REPLACE INTO telemetry_events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                event.trace_id,
+                event.correlation_id,
+                event.timestamp,
+                event.node_id,
+                event.agent_id,
+                event.task_type,
+                event.model,
+                1 if event.streaming else 0,
+                event.input_tokens,
+                event.output_tokens,
+                event.cached_read_tokens,
+                event.cached_write_tokens,
+                event.cost_usd,
+                event.latency_ms,
+                event.prompt_breakdown.model_dump_json(),
+                json.dumps(event.tools_declared),
+                json.dumps(event.tools_invoked),
+                json.dumps(event.raw_usage) if event.raw_usage else None
+            ))
 
     def get_recent_events(self, limit: int = 100, agent_id: Optional[str] = None) -> List[TelemetryEvent]:
         query = "SELECT * FROM telemetry_events"
-        params = []
+        params: List[Any] = []
         if agent_id:
             query += " WHERE agent_id = ?"
             params.append(agent_id)
         query += " ORDER BY timestamp DESC LIMIT ?"
         params.append(limit)
 
-        rows = self.conn.execute(query, params).fetchall()
-        events = []
-        for r in rows:
-            events.append(TelemetryEvent(
-                trace_id=r[0],
-                correlation_id=r[1],
-                timestamp=r[2],
-                node_id=r[3],
-                agent_id=r[4],
-                task_type=r[5],
-                model=r[6],
-                streaming=r[7],
-                input_tokens=r[8],
-                output_tokens=r[9],
-                cached_read_tokens=r[10],
-                cached_write_tokens=r[11],
-                cost_usd=r[12],
-                latency_ms=r[13],
-                prompt_breakdown=PromptBreakdown.model_validate_json(r[14]),
-                tools_declared=json.loads(r[15]) if r[15] else [],
-                tools_invoked=json.loads(r[16]) if r[16] else [],
-                raw_usage=json.loads(r[17]) if r[17] else None
-            ))
-        return events
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(query, params)
+            rows = cursor.fetchall()
+            events = []
+            for r in rows:
+                events.append(TelemetryEvent(
+                    trace_id=r["trace_id"],
+                    correlation_id=r["correlation_id"],
+                    timestamp=r["timestamp"],
+                    node_id=r["node_id"],
+                    agent_id=r["agent_id"],
+                    task_type=r["task_type"],
+                    model=r["model"],
+                    streaming=bool(r["streaming"]),
+                    input_tokens=r["input_tokens"],
+                    output_tokens=r["output_tokens"],
+                    cached_read_tokens=r["cached_read_tokens"],
+                    cached_write_tokens=r["cached_write_tokens"],
+                    cost_usd=r["cost_usd"],
+                    latency_ms=r["latency_ms"],
+                    prompt_breakdown=PromptBreakdown.model_validate_json(r["prompt_breakdown_json"]),
+                    tools_declared=json.loads(r["tools_declared_json"]) if r["tools_declared_json"] else [],
+                    tools_invoked=json.loads(r["tools_invoked_json"]) if r["tools_invoked_json"] else [],
+                    raw_usage=json.loads(r["raw_usage_json"]) if r["raw_usage_json"] else None
+                ))
+            return events
 
     def get_agent_metrics_summary(self) -> List[Dict[str, Any]]:
         query = """
@@ -122,34 +166,96 @@ class DuckDBStorage:
             GROUP BY agent_id
             ORDER BY total_spend_usd DESC
         """
-        results = self.conn.execute(query).fetchall()
-        summaries = []
-        for r in results:
-            summaries.append({
-                "agent_id": r[0],
-                "invocation_count": r[1],
-                "total_spend_usd": round(r[2], 6),
-                "total_input_tokens": r[3],
-                "total_output_tokens": r[4],
-                "total_cached_tokens": r[5],
-                "cache_hit_ratio": round(r[5] / max(1, r[3]), 3),
-                "avg_latency_ms": round(r[6] or 0.0, 1)
-            })
-        return summaries
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            summaries = []
+            for r in rows:
+                inp = r["total_input_tokens"] or 0
+                cached = r["total_cached_tokens"] or 0
+                summaries.append({
+                    "agent_id": r["agent_id"],
+                    "invocation_count": r["invocation_count"],
+                    "total_spend_usd": round(r["total_spend_usd"] or 0.0, 6),
+                    "total_input_tokens": inp,
+                    "total_output_tokens": r["total_output_tokens"] or 0,
+                    "total_cached_tokens": cached,
+                    "cache_hit_ratio": round(cached / max(1, inp), 3),
+                    "avg_latency_ms": round(r["avg_latency_ms"] or 0.0, 1)
+                })
+            return summaries
 
     def save_advisory(self, advisory: AdvisoryMessage):
-        import time
-        self.conn.execute("""
-            INSERT INTO advisories (timestamp, advisory_type, severity, agent_id, node_id, summary, estimated_savings_percent, recommendation, actionable_fix_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            time.time(),
-            advisory.advisory_type,
-            advisory.severity,
-            advisory.agent_id,
-            advisory.node_id,
-            advisory.summary,
-            advisory.estimated_savings_percent,
-            advisory.recommendation,
-            json.dumps(advisory.actionable_fix) if advisory.actionable_fix else None
-        ))
+        with self._get_connection() as conn:
+            conn.execute("""
+                INSERT OR REPLACE INTO advisories VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                str(uuid.uuid4()),
+                time.time(),
+                advisory.advisory_type,
+                advisory.severity,
+                advisory.agent_id,
+                advisory.node_id,
+                advisory.summary,
+                advisory.estimated_savings_percent,
+                advisory.recommendation,
+                json.dumps(advisory.actionable_fix) if advisory.actionable_fix else None
+            ))
+
+    def record_heartbeat(self, heartbeat: NodeHeartbeat):
+        with self._get_connection() as conn:
+            conn.execute("""
+                INSERT OR REPLACE INTO node_heartbeats VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (
+                heartbeat.node_id,
+                heartbeat.timestamp,
+                heartbeat.status,
+                heartbeat.ip_address,
+                heartbeat.memory_mb,
+                heartbeat.backlog_events,
+                json.dumps(heartbeat.active_agents)
+            ))
+
+    def get_node_statuses(self) -> List[Dict[str, Any]]:
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM node_heartbeats ORDER BY timestamp DESC")
+            rows = cursor.fetchall()
+            now = time.time()
+            nodes = []
+            for r in rows:
+                is_stale = (now - r["timestamp"]) > 90.0
+                nodes.append({
+                    "node_id": r["node_id"],
+                    "last_seen_seconds_ago": round(now - r["timestamp"], 1),
+                    "status": "OFFLINE" if is_stale else r["status"],
+                    "ip_address": r["ip_address"],
+                    "memory_mb": r["memory_mb"],
+                    "backlog_events": r["backlog_events"],
+                    "active_agents": json.loads(r["active_agents_json"]) if r["active_agents_json"] else []
+                })
+            return nodes
+
+    def trip_circuit_breaker(self, circuit_key: str, reason: str):
+        with self._get_connection() as conn:
+            conn.execute("""
+                INSERT OR REPLACE INTO tripped_circuits VALUES (?, ?, ?)
+            """, (circuit_key, time.time(), reason))
+
+    def is_circuit_tripped(self, circuit_key: str) -> Optional[Dict[str, Any]]:
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM tripped_circuits WHERE circuit_key = ?", (circuit_key,))
+            row = cursor.fetchone()
+            if row:
+                return {
+                    "circuit_key": row["circuit_key"],
+                    "tripped_at": row["tripped_at"],
+                    "reason": row["reason"]
+                }
+            return None
+
+    def reset_circuit_breaker(self, circuit_key: str):
+        with self._get_connection() as conn:
+            conn.execute("DELETE FROM tripped_circuits WHERE circuit_key = ?", (circuit_key,))
