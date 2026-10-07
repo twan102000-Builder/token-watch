@@ -7,6 +7,8 @@ from tokenwatch.advisor import TokenAdvisorEngine
 from tokenwatch.security import verify_api_key
 from tokenwatch.alerts import LocalAlertDispatcher
 
+from fastapi.concurrency import run_in_threadpool
+
 app = FastAPI(
     title="Token Watch Central Hub",
     description="100% private, zero-external-dependency token monitoring and advisement hub for multi-agent home networks."
@@ -18,8 +20,8 @@ alert_dispatcher = LocalAlertDispatcher()
 
 @app.post("/api/v1/telemetry", dependencies=[Depends(verify_api_key)])
 async def ingest_telemetry(event: TelemetryEvent) -> Dict[str, Any]:
-    advisor.record_event(event)
-    immediate_advisories = advisor.generate_advisories(event.agent_id)
+    await run_in_threadpool(advisor.record_event, event)
+    immediate_advisories = await run_in_threadpool(advisor.generate_advisories, event.agent_id)
     
     # Check if a circuit breaker was tripped
     loop_advisory = next((a for a in immediate_advisories if a.advisory_type == "LOOP_DETECTED"), None)
@@ -42,16 +44,16 @@ async def ingest_telemetry(event: TelemetryEvent) -> Dict[str, Any]:
     }
 
 @app.post("/api/v1/heartbeat", dependencies=[Depends(verify_api_key)])
-async def record_heartbeat(heartbeat: NodeHeartbeat) -> Dict[str, str]:
+def record_heartbeat(heartbeat: NodeHeartbeat) -> Dict[str, str]:
     storage.record_heartbeat(heartbeat)
     return {"status": "ok", "node_id": heartbeat.node_id}
 
 @app.get("/api/v1/nodes", dependencies=[Depends(verify_api_key)])
-async def get_nodes() -> List[Dict[str, Any]]:
+def get_nodes() -> List[Dict[str, Any]]:
     return storage.get_node_statuses()
 
 @app.get("/api/v1/circuit_breakers/check", dependencies=[Depends(verify_api_key)])
-async def check_circuit_breaker(correlation_id: Optional[str] = None, agent_id: Optional[str] = None) -> CircuitBreakerStatus:
+def check_circuit_breaker(correlation_id: Optional[str] = None, agent_id: Optional[str] = None) -> CircuitBreakerStatus:
     if correlation_id:
         status = storage.is_circuit_tripped(correlation_id)
         if status:
@@ -63,27 +65,27 @@ async def check_circuit_breaker(correlation_id: Optional[str] = None, agent_id: 
     return CircuitBreakerStatus(is_tripped=False)
 
 @app.post("/api/v1/circuit_breakers/reset", dependencies=[Depends(verify_api_key)])
-async def reset_circuit_breaker(circuit_key: str) -> Dict[str, str]:
+def reset_circuit_breaker(circuit_key: str) -> Dict[str, str]:
     storage.reset_circuit_breaker(circuit_key)
     return {"status": "reset", "circuit_key": circuit_key}
 
 @app.get("/api/v1/advisories/{agent_id}", response_model=List[AdvisoryMessage], dependencies=[Depends(verify_api_key)])
-async def get_advisories(agent_id: str):
+def get_advisories(agent_id: str):
     return advisor.generate_advisories(agent_id)
 
 @app.get("/api/v1/analytics/summary", response_model=List[Dict[str, Any]], dependencies=[Depends(verify_api_key)])
-async def get_metrics_summary():
+def get_metrics_summary():
     return storage.get_agent_metrics_summary()
 
 @app.get("/api/v1/analytics/events", response_model=List[TelemetryEvent], dependencies=[Depends(verify_api_key)])
-async def get_recent_events(
+def get_recent_events(
     limit: int = Query(50, ge=1, le=500),
     agent_id: Optional[str] = None
 ):
     return storage.get_recent_events(limit=limit, agent_id=agent_id)
 
 @app.get("/")
-async def root():
+def root():
     summary = storage.get_agent_metrics_summary()
     nodes = storage.get_node_statuses()
     total_spend = sum(s["total_spend_usd"] for s in summary)

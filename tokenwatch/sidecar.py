@@ -92,12 +92,12 @@ def create_sidecar_app(
                 # 1. Drain in-memory queue to disk buffer
                 while not telemetry_queue.empty():
                     evt = await telemetry_queue.get()
-                    telemetry_buffer.push(evt)
+                    await asyncio.to_thread(telemetry_buffer.push, evt)
                     telemetry_queue.task_done()
 
                 # 2. Drain local buffer to hub
                 if hub_client and hub_url:
-                    batch = telemetry_buffer.fetch_batch(limit=50)
+                    batch = await asyncio.to_thread(telemetry_buffer.fetch_batch, 50)
                     if batch:
                         successful_ids = []
                         for row_id, evt_json in batch:
@@ -111,7 +111,7 @@ def create_sidecar_app(
                                     successful_ids.append(row_id)
                             except Exception:
                                 break
-                        telemetry_buffer.remove(successful_ids)
+                        await asyncio.to_thread(telemetry_buffer.remove, successful_ids)
 
                     # 3. Send Node Heartbeat every 30s
                     if now - last_heartbeat >= 30.0:
@@ -124,12 +124,13 @@ def create_sidecar_app(
                             except Exception:
                                 mem_mb = 0.0
 
+                            backlog_count = await asyncio.to_thread(telemetry_buffer.count_pending)
                             hb = NodeHeartbeat(
                                 node_id=node_id,
                                 timestamp=now,
                                 status="ONLINE",
                                 memory_mb=round(mem_mb, 1),
-                                backlog_events=telemetry_buffer.count_pending(),
+                                backlog_events=backlog_count,
                                 active_agents=list(active_agents_set)
                             )
                             await hub_client.post(

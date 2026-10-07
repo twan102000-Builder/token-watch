@@ -13,11 +13,15 @@ def get_configured_api_key() -> Optional[str]:
 async def verify_api_key(request: Request) -> bool:
     """
     Enforces pre-shared API key authentication if TOKENWATCH_API_KEY is configured.
-    If no key is configured in the environment, allows requests from localhost.
+    If no key is configured in the environment, strictly limits access to localhost.
     """
     configured_key = get_configured_api_key()
     if not configured_key:
-        return True
+        # Fallback to localhost-only access for secure-by-default behavior
+        client_host = request.client.host if request.client else ""
+        if client_host in ("127.0.0.1", "::1", "localhost"):
+            return True
+        raise HTTPException(status_code=401, detail="Unauthorized: TOKENWATCH_API_KEY is not configured and request is not from localhost")
 
     header_key = request.headers.get(API_KEY_HEADER_NAME)
     auth_header = request.headers.get("Authorization")
