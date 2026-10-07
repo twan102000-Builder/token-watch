@@ -12,6 +12,8 @@ import httpx
 from fastapi import FastAPI, Request, Response, Depends, HTTPException
 from starlette.responses import StreamingResponse
 
+from contextlib import contextmanager
+
 from tokenwatch.decomposer import PromptSlotDecomposer
 from tokenwatch.models import TelemetryEvent, PromptBreakdown, NodeHeartbeat
 from tokenwatch.pricing import calculate_cost
@@ -21,15 +23,25 @@ from tokenwatch.security import verify_api_key, DataRedactor, API_KEY_HEADER_NAM
 class LocalTelemetryBuffer:
     """
     Local SQLite buffer to ensure zero data loss during network blips or Hub restarts.
+    Guarantees clean connection lifecycle management with WAL mode.
     """
     def __init__(self, db_path: str = "data/sidecar_spool.db"):
         os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
         self.db_path = db_path
         self._init_db()
 
+    @contextmanager
+    def _get_conn(self):
+        conn = sqlite3.connect(self.db_path, timeout=10.0)
+        conn.execute("PRAGMA journal_mode = WAL;")
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
+
     def _init_db(self):
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute("PRAGMA journal_mode = WAL;")
+        with self._get_conn() as conn:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS pending_telemetry (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -38,11 +50,11 @@ class LocalTelemetryBuffer:
             """)
 
     def push(self, event: TelemetryEvent):
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_conn() as conn:
             conn.execute("INSERT INTO pending_telemetry (event_json) VALUES (?)", (event.model_dump_json(),))
 
     def fetch_batch(self, limit: int = 50) -> List[tuple]:
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_conn() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT id, event_json FROM pending_telemetry ORDER BY id ASC LIMIT ?", (limit,))
             return cursor.fetchall()
@@ -50,12 +62,12 @@ class LocalTelemetryBuffer:
     def remove(self, ids: List[int]):
         if not ids:
             return
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_conn() as conn:
             placeholders = ",".join("?" * len(ids))
             conn.execute(f"DELETE FROM pending_telemetry WHERE id IN ({placeholders})", ids)
 
     def count_pending(self) -> int:
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_conn() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT COUNT(*) FROM pending_telemetry")
             row = cursor.fetchone()
@@ -167,14 +179,19 @@ def create_sidecar_app(
         model = body.get("model", "unknown-model")
         is_streaming = body.get("stream", False)
 
-        # 1. Circuit Breaker Check
-        if correlation_id and hub_client and hub_url:
+        # 1. Circuit Breaker Check (both conversation chain and rogue agent)
+        if hub_client and hub_url and (correlation_id or agent_id):
             try:
+                params = []
+                if correlation_id:
+                    params.append(f"correlation_id={correlation_id}")
+                if agent_id:
+                    params.append(f"agent_id={agent_id}")
                 cb_resp = await hub_client.get(
-                    f"{hub_url.rstrip('/')}/api/v1/circuit_breakers/check?correlation_id={correlation_id}"
+                    f"{hub_url.rstrip('/')}/api/v1/circuit_breakers/check?{'&'.join(params)}"
                 )
                 if cb_resp.status_code == 200 and cb_resp.json().get("is_tripped"):
-                    reason = cb_resp.json().get("reason", "Loop detected")
+                    reason = cb_resp.json().get("reason", "Circuit breaker tripped")
                     return Response(
                         content=json.dumps({
                             "error": "circuit_breaker_tripped",
@@ -203,10 +220,11 @@ def create_sidecar_app(
         # 4. Prompt Slot Decomposition (with secret redaction)
         breakdown = decomposer.decompose(body, redact_secrets=True)
 
-        # Forward headers upstream (strip host & tokenwatch internal auth)
+        # Forward headers upstream (strip host, internal auth, and hop-by-hop headers)
+        hop_by_hop = {"host", "content-length", "connection", "transfer-encoding", "keep-alive", API_KEY_HEADER_NAME.lower()}
         upstream_headers = {
             k: v for k, v in request.headers.items() 
-            if k.lower() not in ["host", "content-length", API_KEY_HEADER_NAME.lower()]
+            if k.lower() not in hop_by_hop
         }
 
         if is_streaming:
@@ -278,7 +296,8 @@ def create_sidecar_app(
                     )
                     await telemetry_queue.put(evt)
 
-            return StreamingResponse(stream_generator(), media_type="text/event-stream")
+            media_type = upstream_resp.headers.get("content-type", "text/event-stream")
+            return StreamingResponse(stream_generator(), status_code=upstream_resp.status_code, media_type=media_type)
 
         else:
             resp = await client.post("/chat/completions", json=body, headers=upstream_headers)

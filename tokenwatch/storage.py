@@ -3,6 +3,7 @@ import json
 import sqlite3
 import time
 import uuid
+from contextlib import contextmanager
 from typing import List, Optional, Dict, Any
 from tokenwatch.models import TelemetryEvent, PromptBreakdown, AdvisoryMessage, NodeHeartbeat
 
@@ -21,14 +22,25 @@ class SQLiteStorage:
             self._mem_conn.row_factory = sqlite3.Row
         self._init_schema()
 
-    def _get_connection(self) -> sqlite3.Connection:
+    @contextmanager
+    def _get_connection(self):
+        """
+        Yields an open SQLite connection with WAL enabled and guarantees
+        explicit connection closing upon exit to prevent open file descriptor leaks.
+        """
         if self.is_memory and self._mem_conn:
-            return self._mem_conn
-        conn = sqlite3.connect(self.db_path, timeout=10.0)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode = WAL;")
-        conn.execute("PRAGMA synchronous = NORMAL;")
-        return conn
+            with self._mem_conn:
+                yield self._mem_conn
+        else:
+            conn = sqlite3.connect(self.db_path, timeout=10.0)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode = WAL;")
+            conn.execute("PRAGMA synchronous = NORMAL;")
+            try:
+                with conn:
+                    yield conn
+            finally:
+                conn.close()
 
     def _init_schema(self):
         with self._get_connection() as conn:
@@ -55,6 +67,10 @@ class SQLiteStorage:
                 );
             """)
 
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_telemetry_agent_time ON telemetry_events (agent_id, timestamp DESC);")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_telemetry_corr ON telemetry_events (correlation_id);")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_telemetry_time ON telemetry_events (timestamp DESC);")
+
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS advisories (
                     id TEXT PRIMARY KEY,
@@ -69,6 +85,9 @@ class SQLiteStorage:
                     actionable_fix_json TEXT
                 );
             """)
+
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_advisories_agent ON advisories (agent_id, timestamp DESC);")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_advisories_time ON advisories (timestamp DESC);")
 
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS node_heartbeats (
@@ -115,12 +134,23 @@ class SQLiteStorage:
                 json.dumps(event.raw_usage) if event.raw_usage else None
             ))
 
-    def get_recent_events(self, limit: int = 100, agent_id: Optional[str] = None) -> List[TelemetryEvent]:
+    def get_recent_events(
+        self,
+        limit: int = 100,
+        agent_id: Optional[str] = None,
+        correlation_id: Optional[str] = None
+    ) -> List[TelemetryEvent]:
         query = "SELECT * FROM telemetry_events"
         params: List[Any] = []
+        conditions = []
         if agent_id:
-            query += " WHERE agent_id = ?"
+            conditions.append("agent_id = ?")
             params.append(agent_id)
+        if correlation_id:
+            conditions.append("correlation_id = ?")
+            params.append(correlation_id)
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
         query += " ORDER BY timestamp DESC LIMIT ?"
         params.append(limit)
 
@@ -202,6 +232,33 @@ class SQLiteStorage:
                 advisory.recommendation,
                 json.dumps(advisory.actionable_fix) if advisory.actionable_fix else None
             ))
+
+    def get_recent_advisories(self, limit: int = 50, agent_id: Optional[str] = None) -> List[AdvisoryMessage]:
+        query = "SELECT * FROM advisories"
+        params: List[Any] = []
+        if agent_id:
+            query += " WHERE agent_id = ?"
+            params.append(agent_id)
+        query += " ORDER BY timestamp DESC LIMIT ?"
+        params.append(limit)
+
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(query, params)
+            rows = cursor.fetchall()
+            advisories = []
+            for r in rows:
+                advisories.append(AdvisoryMessage(
+                    advisory_type=r["advisory_type"],
+                    severity=r["severity"],
+                    agent_id=r["agent_id"],
+                    node_id=r["node_id"],
+                    summary=r["summary"],
+                    estimated_savings_percent=r["estimated_savings_percent"],
+                    recommendation=r["recommendation"],
+                    actionable_fix=json.loads(r["actionable_fix_json"]) if r["actionable_fix_json"] else None
+                ))
+            return advisories
 
     def record_heartbeat(self, heartbeat: NodeHeartbeat):
         with self._get_connection() as conn:

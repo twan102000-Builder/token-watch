@@ -39,8 +39,11 @@ def generate_dashboard(hub_url: str, api_key: str = None) -> Layout:
 
             events_resp = client.get(f"{hub_url.rstrip('/')}/api/v1/analytics/events?limit=8")
             events = events_resp.json() if events_resp.status_code == 200 else []
+
+            advisories_resp = client.get(f"{hub_url.rstrip('/')}/api/v1/advisories?limit=5")
+            advisories = advisories_resp.json() if advisories_resp.status_code == 200 else []
     except Exception:
-        summaries, nodes, events = [], [], []
+        summaries, nodes, events, advisories = [], [], [], []
 
     # Header
     total_spend = sum(s.get("total_spend_usd", 0.0) for s in summaries)
@@ -91,7 +94,12 @@ def generate_dashboard(hub_url: str, api_key: str = None) -> Layout:
 
     # Advisories Panel
     adv_lines = []
-    if events:
+    if advisories:
+        for a in advisories:
+            sev = a.get("severity", "INFO")
+            color = "red" if sev == "CRITICAL" else ("yellow" if sev == "WARNING" else "blue")
+            adv_lines.append(f"[bold {color}]● [{sev}] {a.get('advisory_type')}[/bold {color}] ({a.get('agent_id')}): {a.get('summary')} → {a.get('recommendation')}")
+    elif events:
         latest = events[0]
         tools_dec = len(latest.get("tools_declared", []))
         tools_inv = len(latest.get("tools_invoked", []))

@@ -136,3 +136,124 @@ def test_heartbeat_and_circuit_breaker():
 
     storage.reset_circuit_breaker("loop-corr-99")
     assert storage.is_circuit_tripped("loop-corr-99") is None
+
+def test_expanded_redactor():
+    sample = "AWS: AKIAIOSFODNN7EXAMPLE, HF: hf_abcdefghijklmnopqrstuvwxyz01234567, Slack: xoxb-1234567890-abcdefghij"
+    redacted = DataRedactor.redact_text(sample)
+    assert "[REDACTED_AWS_KEY]" in redacted
+    assert "[REDACTED_HF_KEY]" in redacted
+    assert "[REDACTED_SLACK_KEY]" in redacted
+
+def test_modern_pricing():
+    cost_c37 = calculate_cost("claude-3-7-sonnet", input_tokens=1000, output_tokens=500)
+    assert cost_c37 > 0
+    cost_ds = calculate_cost("deepseek-chat", input_tokens=100_000, output_tokens=10_000)
+    assert pytest.approx(cost_ds, 0.001) == 0.0168
+    cost_r1 = calculate_cost("deepseek-r1", input_tokens=100_000, output_tokens=10_000)
+    assert pytest.approx(cost_r1, 0.001) == 0.0769
+
+def test_advisories_persistence_and_correlation_filter():
+    storage = SQLiteStorage(db_path=":memory:")
+    from tokenwatch.models import AdvisoryMessage
+    adv = AdvisoryMessage(
+        advisory_type="TOOL_PRUNING",
+        severity="WARNING",
+        agent_id="test_agent",
+        node_id="node_1",
+        summary="Prune unused tools",
+        estimated_savings_percent=45.0,
+        recommendation="Use dynamic pruning"
+    )
+    storage.save_advisory(adv)
+    advisories = storage.get_recent_advisories(agent_id="test_agent")
+    assert len(advisories) == 1
+    assert advisories[0].advisory_type == "TOOL_PRUNING"
+
+    # Test correlation filter
+    evt1 = TelemetryEvent(
+        trace_id="t-c1", correlation_id="c-unique", node_id="n1", agent_id="a1",
+        model="gpt-4o", input_tokens=100, output_tokens=50,
+        prompt_breakdown=PromptBreakdown(system_instructions=100, total_prompt_tokens=100)
+    )
+    evt2 = TelemetryEvent(
+        trace_id="t-c2", correlation_id="c-other", node_id="n1", agent_id="a1",
+        model="gpt-4o", input_tokens=100, output_tokens=50,
+        prompt_breakdown=PromptBreakdown(system_instructions=100, total_prompt_tokens=100)
+    )
+    storage.save_event(evt1)
+    storage.save_event(evt2)
+    filtered = storage.get_recent_events(correlation_id="c-unique")
+    assert len(filtered) == 1
+    assert filtered[0].trace_id == "t-c1"
+
+def test_hub_api_client():
+    from starlette.testclient import TestClient
+    from tokenwatch.hub import app
+
+    client = TestClient(app)
+    # 1. Root health
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "ONLINE"
+
+    # 2. Ingest telemetry
+    payload = {
+        "trace_id": "test-trace-e2e",
+        "correlation_id": "corr-e2e",
+        "node_id": "edge_test",
+        "agent_id": "thermostat_agent",
+        "model": "gpt-4o-mini",
+        "streaming": False,
+        "input_tokens": 500,
+        "output_tokens": 50,
+        "prompt_breakdown": {
+            "system_instructions": 200,
+            "tool_schemas": 200,
+            "conversation_history": 0,
+            "iot_telemetry": 50,
+            "task_payload": 50,
+            "total_prompt_tokens": 500
+        }
+    }
+    ingest_resp = client.post("/api/v1/telemetry", json=payload)
+    assert ingest_resp.status_code == 200
+    assert ingest_resp.json()["status"] == "ok"
+
+    # 3. Analytics
+    summary_resp = client.get("/api/v1/analytics/summary")
+    assert summary_resp.status_code == 200
+    assert any(s["agent_id"] == "thermostat_agent" for s in summary_resp.json())
+
+    # 4. Advisories list endpoint
+    adv_resp = client.get("/api/v1/advisories")
+    assert adv_resp.status_code == 200
+
+    # 5. Circuit breaker endpoints
+    cb_check = client.get("/api/v1/circuit_breakers/check?correlation_id=corr-e2e")
+    assert cb_check.status_code == 200
+    assert cb_check.json()["is_tripped"] is False
+
+    cb_reset = client.post("/api/v1/circuit_breakers/reset?circuit_key=corr-e2e")
+    assert cb_reset.status_code == 200
+
+def test_local_telemetry_buffer(tmp_path):
+    from tokenwatch.sidecar import LocalTelemetryBuffer
+    db_file = str(tmp_path / "spool.db")
+    buf = LocalTelemetryBuffer(db_path=db_file)
+    assert buf.count_pending() == 0
+
+    evt = TelemetryEvent(
+        trace_id="t-spool-1", node_id="node_1", agent_id="agent_1",
+        model="gpt-4o", input_tokens=100, output_tokens=20,
+        prompt_breakdown=PromptBreakdown(total_prompt_tokens=100)
+    )
+    buf.push(evt)
+    assert buf.count_pending() == 1
+
+    batch = buf.fetch_batch(limit=10)
+    assert len(batch) == 1
+    row_id, data = batch[0]
+    assert "t-spool-1" in data
+
+    buf.remove([row_id])
+    assert buf.count_pending() == 0

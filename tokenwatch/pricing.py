@@ -4,6 +4,7 @@ from typing import Dict, Any, Tuple
 # (input_per_m, output_per_m, cache_read_per_m, cache_write_per_m)
 MODEL_PRICING: Dict[str, Tuple[float, float, float, float]] = {
     # Anthropic
+    "claude-3-7-sonnet": (3.00, 15.00, 0.30, 3.75),
     "claude-3-5-sonnet-20241022": (3.00, 15.00, 0.30, 3.75),
     "claude-3-5-haiku-20241022": (0.80, 4.00, 0.08, 1.00),
     "claude-3-opus-20240229": (15.00, 75.00, 1.50, 18.75),
@@ -19,6 +20,10 @@ MODEL_PRICING: Dict[str, Tuple[float, float, float, float]] = {
     "gemini-1.5-flash": (0.075, 0.30, 0.01875, 0.075),
     "gemini-2.0-flash": (0.10, 0.40, 0.025, 0.10),
     "gemini-2.5-flash": (0.10, 0.40, 0.025, 0.10),
+
+    # DeepSeek
+    "deepseek-chat": (0.14, 0.28, 0.014, 0.14),
+    "deepseek-r1": (0.55, 2.19, 0.14, 0.55),
     
     # Local models (vLLM / Ollama)
     "local-llama-3.1-8b": (0.00, 0.00, 0.00, 0.00),

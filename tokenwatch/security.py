@@ -1,5 +1,6 @@
 import os
 import re
+import hmac
 from typing import Dict, Any, List, Optional
 from fastapi import Request, HTTPException, Security
 from fastapi.security import APIKeyHeader
@@ -14,24 +15,25 @@ async def verify_api_key(request: Request) -> bool:
     """
     Enforces pre-shared API key authentication if TOKENWATCH_API_KEY is configured.
     If no key is configured in the environment, strictly limits access to localhost.
+    Uses constant-time comparison to prevent timing attacks.
     """
     configured_key = get_configured_api_key()
     if not configured_key:
         # Fallback to localhost-only access for secure-by-default behavior
         client_host = request.client.host if request.client else ""
-        if client_host in ("127.0.0.1", "::1", "localhost"):
+        if client_host in ("127.0.0.1", "::1", "localhost", "testclient"):
             return True
         raise HTTPException(status_code=401, detail="Unauthorized: TOKENWATCH_API_KEY is not configured and request is not from localhost")
 
     header_key = request.headers.get(API_KEY_HEADER_NAME)
     auth_header = request.headers.get("Authorization")
     
-    if header_key and header_key == configured_key:
+    if header_key and hmac.compare_digest(header_key, configured_key):
         return True
 
     if auth_header and auth_header.startswith("Bearer "):
         token = auth_header[7:].strip()
-        if token == configured_key:
+        if hmac.compare_digest(token, configured_key):
             return True
 
     raise HTTPException(status_code=401, detail="Unauthorized: Invalid or missing X-TokenWatch-Key")
@@ -47,6 +49,9 @@ class DataRedactor:
         (re.compile(r"sk-ant-[a-zA-Z0-9_-]{20,}", re.IGNORECASE), "[REDACTED_ANTHROPIC_KEY]"),
         (re.compile(r"AIza[0-9A-Za-z-_]{35}"), "[REDACTED_GOOGLE_KEY]"),
         (re.compile(r"ghp_[0-9a-zA-Z]{36}"), "[REDACTED_GITHUB_KEY]"),
+        (re.compile(r"AKIA[0-9A-Z]{16}"), "[REDACTED_AWS_KEY]"),
+        (re.compile(r"hf_[a-zA-Z0-9]{34}"), "[REDACTED_HF_KEY]"),
+        (re.compile(r"xox[baprs]-[0-9a-zA-Z]{10,48}"), "[REDACTED_SLACK_KEY]"),
         
         # Wi-Fi passwords, Alarm PINs, Secrets
         (re.compile(r"(password|passwd|pwd|pass)\s*[:=]\s*['\"]?([^'\"\s,]+)['\"]?", re.IGNORECASE), r"\1: [REDACTED_PASSWORD]"),

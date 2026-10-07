@@ -103,7 +103,7 @@ class TokenAdvisorEngine:
 
         # 5. Multi-Agent Ping-Pong Loop Detection & Active Circuit Trip
         if latest.correlation_id:
-            chain = [e for e in self.storage.get_recent_events(limit=20) if e.correlation_id == latest.correlation_id]
+            chain = self.storage.get_recent_events(limit=20, correlation_id=latest.correlation_id)
             if len(chain) >= 4:
                 time_span = abs(chain[0].timestamp - chain[-1].timestamp)
                 if time_span < 60.0:
