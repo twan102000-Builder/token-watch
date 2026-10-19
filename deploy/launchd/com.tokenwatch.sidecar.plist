@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.tokenwatch.sidecar</string>
+    <key>WorkingDirectory</key>
+    <string>/Volumes/990_PRO/AntiGravity_Workspace/Token Watch</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Volumes/990_PRO/AntiGravity_Workspace/Token Watch/.venv/bin/python</string>
+        <string>-m</string>
+        <string>tokenwatch.sidecar</string>
+        <string>--port</string>
+        <string>8080</string>
+        <string>--host</string>
+        <string>127.0.0.1</string>
+        <string>--upstream</string>
+        <string>http://localhost:11434/v1</string>
+        <string>--hub-url</string>
+        <string>http://127.0.0.1:9000</string>
+        <string>--node-id</string>
+        <string>node_mac_m4</string>
+        <string>--optimize-tools</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Volumes/990_PRO/AntiGravity_Workspace/Token Watch/.venv/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/Volumes/990_PRO/AntiGravity_Workspace/Token Watch/data/tokenwatch-sidecar.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Volumes/990_PRO/AntiGravity_Workspace/Token Watch/data/tokenwatch-sidecar.err.log</string>
+</dict>
+</plist>

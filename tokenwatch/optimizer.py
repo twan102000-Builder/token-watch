@@ -1,34 +1,38 @@
 import re
-from typing import List, Dict, Any, Tuple, Optional
+from typing import Any
+
 
 class DynamicToolPruner:
     """
     Ranks tools against the user prompt using token-frequency scoring
     and prunes non-relevant tools to dramatically reduce schema bloat.
     """
+
     def __init__(self, min_keep: int = 3, max_keep: int = 8):
         self.min_keep = min_keep
         self.max_keep = max_keep
 
-    def _tokenize(self, text: str) -> set:
+    def _tokenize(self, text: str) -> set[str]:
         return set(re.findall(r"\w+", text.lower()))
 
-    def score_tool(self, tool: Dict[str, Any], query_tokens: set) -> float:
+    def score_tool(self, tool: dict[str, Any], query_tokens: set[str]) -> float:
         function = tool.get("function", {})
         name = function.get("name", "")
         desc = function.get("description", "")
         params = str(function.get("parameters", {}))
-        
+
         target_text = f"{name} {name.replace('_', ' ')} {desc} {params}".lower()
         target_tokens = self._tokenize(target_text)
-        
+
         if not query_tokens or not target_tokens:
             return 0.0
 
         matches = query_tokens.intersection(target_tokens)
         return len(matches) / (len(query_tokens) ** 0.5)
 
-    def prune_tools(self, tools: List[Dict[str, Any]], user_query: str) -> Tuple[List[Dict[str, Any]], List[str]]:
+    def prune_tools(
+        self, tools: list[dict[str, Any]], user_query: str
+    ) -> tuple[list[dict[str, Any]], list[str]]:
         """
         Returns (kept_tools, pruned_tool_names)
         """
@@ -44,20 +48,22 @@ class DynamicToolPruner:
 
         # Sort descending by score
         scored.sort(key=lambda x: x[0], reverse=True)
-        
+
         # Keep top max_keep
-        kept = [item[2] for item in scored[:self.max_keep]]
-        pruned_names = [item[1] for item in scored[self.max_keep:]]
+        kept = [item[2] for item in scored[: self.max_keep]]
+        pruned_names = [item[1] for item in scored[self.max_keep :]]
 
         return kept, pruned_names
+
 
 class PrefixCacheStabilizer:
     """
     Reorders chat message components so static blocks (system prompt, schemas)
     sit at the prefix to maximize KV cache hit rates.
     """
+
     @staticmethod
-    def stabilize_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    def stabilize_payload(payload: dict[str, Any]) -> dict[str, Any]:
         messages = payload.get("messages", [])
         if not messages:
             return payload
@@ -70,15 +76,17 @@ class PrefixCacheStabilizer:
         payload["messages"] = system_msgs + other_msgs
         return payload
 
+
 class TelemetryCompactor:
     """
     Maintains entity state cache and replaces redundant full sensor dumps
     with state-change diffs.
     """
-    def __init__(self):
-        self._last_states: Dict[str, str] = {}
 
-    def compact_state_dict(self, current_states: Dict[str, Any]) -> Dict[str, Any]:
+    def __init__(self):
+        self._last_states: dict[str, str] = {}
+
+    def compact_state_dict(self, current_states: dict[str, Any]) -> dict[str, Any]:
         """
         Takes { 'living_room_temp': '72', 'hvac': 'idle' ... }
         Returns only entries that changed since last invocation.
@@ -89,7 +97,8 @@ class TelemetryCompactor:
             if self._last_states.get(entity_id) != str_val:
                 diffs[entity_id] = val
                 self._last_states[entity_id] = str_val
-        
+
         if not diffs:
             return {"status": "all_states_unchanged", "entity_count": len(current_states)}
         return diffs
+

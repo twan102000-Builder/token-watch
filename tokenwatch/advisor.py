@@ -1,6 +1,6 @@
-from typing import List, Dict, Any, Optional
-from tokenwatch.models import TelemetryEvent, AdvisoryMessage
+from tokenwatch.models import AdvisoryMessage, TelemetryEvent
 from tokenwatch.storage import SQLiteStorage
+
 
 class TokenAdvisorEngine:
     """
@@ -8,14 +8,20 @@ class TokenAdvisorEngine:
     to generate actionable, high-impact token and cost reduction advisories.
     Backed by 100% private, zero-external-dependency SQLite with WAL mode.
     """
-    def __init__(self, storage: Optional[SQLiteStorage] = None):
+
+    def __init__(self, storage: SQLiteStorage | None = None):
         self.storage = storage or SQLiteStorage(db_path=":memory:")
 
-    def record_event(self, event: TelemetryEvent):
+    def record_event(self, event: TelemetryEvent) -> None:
         self.storage.save_event(event)
 
-    def generate_advisories(self, agent_id: str) -> List[AdvisoryMessage]:
-        advisories: List[AdvisoryMessage] = []
+    def generate_advisories(
+        self,
+        agent_id: str,
+        persist: bool = True,
+        trip_circuits: bool = True,
+    ) -> list[AdvisoryMessage]:
+        advisories: list[AdvisoryMessage] = []
         recent_events = self.storage.get_recent_events(limit=50, agent_id=agent_id)
         if not recent_events:
             return advisories
@@ -28,7 +34,7 @@ class TokenAdvisorEngine:
             invoked_set = set()
             for e in recent_events[:30]:
                 invoked_set.update(e.tools_invoked)
-            
+
             dormant_tools = [t for t in latest.tools_declared if t not in invoked_set]
             if len(dormant_tools) >= max(3, total_tools * 0.4) and latest.prompt_breakdown.tool_schemas > 400:
                 # Estimate token savings
@@ -42,14 +48,20 @@ class TokenAdvisorEngine:
                         severity="WARNING",
                         agent_id=agent_id,
                         node_id=latest.node_id,
-                        summary=f"{len(dormant_tools)} of {total_tools} tools declared were never invoked across the last {len(recent_events[:30])} turns.",
+                        summary=(
+                            f"{len(dormant_tools)} of {total_tools} tools declared were never invoked "
+                            f"across the last {len(recent_events[:30])} turns."
+                        ),
                         estimated_savings_percent=round(savings_pct, 1),
-                        recommendation=f"Prune dormant tool schemas ({', '.join(dormant_tools[:4])}...). Save ~{wasted_tokens} tokens per request.",
+                        recommendation=(
+                            f"Prune dormant tool schemas ({', '.join(dormant_tools[:4])}...). "
+                            f"Save ~{wasted_tokens} tokens per request."
+                        ),
                         actionable_fix={
                             "action": "enable_dynamic_tool_pruning",
                             "prune_candidates": dormant_tools,
-                            "estimated_token_savings": wasted_tokens
-                        }
+                            "estimated_token_savings": wasted_tokens,
+                        },
                     )
                 )
 
@@ -63,13 +75,19 @@ class TokenAdvisorEngine:
                     node_id=latest.node_id,
                     summary="Zero prompt cache hits detected on large static system instructions.",
                     estimated_savings_percent=75.0,
-                    recommendation="Reorder prompt: Place static system instructions and tool definitions at the prefix before dynamic telemetry.",
-                    actionable_fix={"action": "reorder_prefix", "header": "X-Stabilize-Prefix: true"}
+                    recommendation=(
+                        "Reorder prompt: Place static system instructions and tool definitions "
+                        "at the prefix before dynamic telemetry."
+                    ),
+                    actionable_fix={"action": "reorder_prefix", "header": "X-Stabilize-Prefix: true"},
                 )
             )
 
         # 3. Telemetry State Compaction (IoT sensor spam)
-        if latest.prompt_breakdown.iot_telemetry > 350 and (latest.prompt_breakdown.iot_telemetry / max(1, latest.input_tokens)) > 0.35:
+        if (
+            latest.prompt_breakdown.iot_telemetry > 350
+            and (latest.prompt_breakdown.iot_telemetry / max(1, latest.input_tokens)) > 0.35
+        ):
             advisories.append(
                 AdvisoryMessage(
                     advisory_type="DELTA_COMPACTION",
@@ -78,14 +96,18 @@ class TokenAdvisorEngine:
                     node_id=latest.node_id,
                     summary="High proportion of raw IoT telemetry sensor state dumped into prompt.",
                     estimated_savings_percent=60.0,
-                    recommendation="Enable Telemetry Compactor: pass entity state changes (diffs) instead of repeated static entity tables.",
-                    actionable_fix={"action": "enable_telemetry_diffs"}
+                    recommendation=(
+                        "Enable Telemetry Compactor: pass entity state changes (diffs) "
+                        "instead of repeated static entity tables."
+                    ),
+                    actionable_fix={"action": "enable_telemetry_diffs"},
                 )
             )
 
         # 4. Model Downgrade / Cascading Advisory
-        expensive_models = ["claude-3-5-sonnet", "gpt-4o", "o1", "claude-3-opus"]
-        if any(m in latest.model.lower() for m in expensive_models):
+        expensive_models = ["claude-3-7-sonnet", "claude-3-5-sonnet", "gpt-4o", "o1", "claude-3-opus"]
+        lower_model = latest.model.lower()
+        if any(m in lower_model for m in expensive_models) and "mini" not in lower_model:
             avg_out = sum(e.output_tokens for e in recent_events[:10]) / max(1, len(recent_events[:10]))
             if avg_out < 60 and len(latest.tools_invoked) <= 1:
                 advisories.append(
@@ -94,10 +116,16 @@ class TokenAdvisorEngine:
                         severity="INFO",
                         agent_id=agent_id,
                         node_id=latest.node_id,
-                        summary=f"Agent '{agent_id}' uses tier-1 model ({latest.model}) for low-complexity turns (avg {int(avg_out)} tokens out).",
+                        summary=(
+                            f"Agent '{agent_id}' uses tier-1 model ({latest.model}) "
+                            f"for low-complexity turns (avg {int(avg_out)} tokens out)."
+                        ),
                         estimated_savings_percent=85.0,
-                        recommendation="Route to fast tier model (e.g. 'gemini-2.5-flash' or local 'llama-3.1-8b') for 85%+ cost reduction.",
-                        actionable_fix={"recommended_model": "gemini-2.5-flash"}
+                        recommendation=(
+                            "Route to fast tier model (e.g. 'gemini-2.5-flash' or local 'llama-3.1-8b') "
+                            "for 85%+ cost reduction."
+                        ),
+                        actionable_fix={"recommended_model": "gemini-2.5-flash"},
                     )
                 )
 
@@ -107,10 +135,13 @@ class TokenAdvisorEngine:
             if len(chain) >= 4:
                 time_span = abs(chain[0].timestamp - chain[-1].timestamp)
                 if time_span < 60.0:
-                    trip_reason = f"Rapid multi-agent chatter loop detected: {len(chain)} turns in {round(time_span, 1)}s across correlation ID {latest.correlation_id}"
-                    # Trip circuit breaker in storage
-                    self.storage.trip_circuit_breaker(latest.correlation_id, trip_reason)
-                    
+                    trip_reason = (
+                        f"Rapid multi-agent chatter loop detected: {len(chain)} turns "
+                        f"in {round(time_span, 1)}s across correlation ID {latest.correlation_id}"
+                    )
+                    if trip_circuits:
+                        self.storage.trip_circuit_breaker(latest.correlation_id, trip_reason)
+
                     advisories.append(
                         AdvisoryMessage(
                             advisory_type="LOOP_DETECTED",
@@ -119,13 +150,18 @@ class TokenAdvisorEngine:
                             node_id=latest.node_id,
                             summary=trip_reason,
                             estimated_savings_percent=90.0,
-                            recommendation="Circuit breaker TRIPPED: recursive handoffs halted. Requests on this correlation ID will be blocked.",
-                            actionable_fix={"action": "circuit_breaker_trip", "correlation_id": latest.correlation_id}
+                            recommendation=(
+                                "Circuit breaker TRIPPED: recursive handoffs halted. "
+                                "Requests on this correlation ID will be blocked."
+                            ),
+                            actionable_fix={"action": "circuit_breaker_trip", "correlation_id": latest.correlation_id},
                         )
                     )
 
-        # Save generated advisories
-        for adv in advisories:
-            self.storage.save_advisory(adv)
+        # Save generated advisories when persist=True
+        if persist:
+            for adv in advisories:
+                self.storage.save_advisory(adv)
 
         return advisories
+

@@ -1,23 +1,27 @@
-import os
 import json
+import os
 import sqlite3
 import time
 import uuid
 from contextlib import contextmanager
-from typing import List, Optional, Dict, Any
-from tokenwatch.models import TelemetryEvent, PromptBreakdown, AdvisoryMessage, NodeHeartbeat
+from typing import Any
+
+from tokenwatch.models import AdvisoryMessage, NodeHeartbeat, PromptBreakdown, TelemetryEvent
+
 
 class SQLiteStorage:
     """
     100% private, self-contained embedded storage powered by Python's built-in sqlite3.
     Uses Write-Ahead Logging (WAL) for high concurrency and zero external binary dependencies.
     """
-    def __init__(self, db_path: str = "data/tokenwatch.db"):
-        self.is_memory = db_path == ":memory:"
+
+    def __init__(self, db_path: str | None = None):
+        resolved_path = db_path or os.environ.get("TOKENWATCH_DB_PATH", "data/tokenwatch.db")
+        self.is_memory = resolved_path == ":memory:"
         if not self.is_memory:
-            os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
-        self.db_path = db_path
-        self._mem_conn = sqlite3.connect(":memory:") if self.is_memory else None
+            os.makedirs(os.path.dirname(os.path.abspath(resolved_path)), exist_ok=True)
+        self.db_path = resolved_path
+        self._mem_conn = sqlite3.connect(":memory:", check_same_thread=False) if self.is_memory else None
         if self._mem_conn:
             self._mem_conn.row_factory = sqlite3.Row
         self._init_schema()
@@ -42,7 +46,7 @@ class SQLiteStorage:
             finally:
                 conn.close()
 
-    def _init_schema(self):
+    def _init_schema(self) -> None:
         with self._get_connection() as conn:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS telemetry_events (
@@ -67,7 +71,9 @@ class SQLiteStorage:
                 );
             """)
 
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_telemetry_agent_time ON telemetry_events (agent_id, timestamp DESC);")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_telemetry_agent_time ON telemetry_events (agent_id, timestamp DESC);"
+            )
             conn.execute("CREATE INDEX IF NOT EXISTS idx_telemetry_corr ON telemetry_events (correlation_id);")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_telemetry_time ON telemetry_events (timestamp DESC);")
 
@@ -109,39 +115,42 @@ class SQLiteStorage:
                 );
             """)
 
-    def save_event(self, event: TelemetryEvent):
+    def save_event(self, event: TelemetryEvent) -> None:
         with self._get_connection() as conn:
-            conn.execute("""
+            conn.execute(
+                """
                 INSERT OR REPLACE INTO telemetry_events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                event.trace_id,
-                event.correlation_id,
-                event.timestamp,
-                event.node_id,
-                event.agent_id,
-                event.task_type,
-                event.model,
-                1 if event.streaming else 0,
-                event.input_tokens,
-                event.output_tokens,
-                event.cached_read_tokens,
-                event.cached_write_tokens,
-                event.cost_usd,
-                event.latency_ms,
-                event.prompt_breakdown.model_dump_json(),
-                json.dumps(event.tools_declared),
-                json.dumps(event.tools_invoked),
-                json.dumps(event.raw_usage) if event.raw_usage else None
-            ))
+            """,
+                (
+                    event.trace_id,
+                    event.correlation_id,
+                    event.timestamp,
+                    event.node_id,
+                    event.agent_id,
+                    event.task_type,
+                    event.model,
+                    1 if event.streaming else 0,
+                    event.input_tokens,
+                    event.output_tokens,
+                    event.cached_read_tokens,
+                    event.cached_write_tokens,
+                    event.cost_usd,
+                    event.latency_ms,
+                    event.prompt_breakdown.model_dump_json(),
+                    json.dumps(event.tools_declared),
+                    json.dumps(event.tools_invoked),
+                    json.dumps(event.raw_usage) if event.raw_usage else None,
+                ),
+            )
 
     def get_recent_events(
         self,
         limit: int = 100,
-        agent_id: Optional[str] = None,
-        correlation_id: Optional[str] = None
-    ) -> List[TelemetryEvent]:
+        agent_id: str | None = None,
+        correlation_id: str | None = None,
+    ) -> list[TelemetryEvent]:
         query = "SELECT * FROM telemetry_events"
-        params: List[Any] = []
+        params: list[Any] = []
         conditions = []
         if agent_id:
             conditions.append("agent_id = ?")
@@ -160,29 +169,31 @@ class SQLiteStorage:
             rows = cursor.fetchall()
             events = []
             for r in rows:
-                events.append(TelemetryEvent(
-                    trace_id=r["trace_id"],
-                    correlation_id=r["correlation_id"],
-                    timestamp=r["timestamp"],
-                    node_id=r["node_id"],
-                    agent_id=r["agent_id"],
-                    task_type=r["task_type"],
-                    model=r["model"],
-                    streaming=bool(r["streaming"]),
-                    input_tokens=r["input_tokens"],
-                    output_tokens=r["output_tokens"],
-                    cached_read_tokens=r["cached_read_tokens"],
-                    cached_write_tokens=r["cached_write_tokens"],
-                    cost_usd=r["cost_usd"],
-                    latency_ms=r["latency_ms"],
-                    prompt_breakdown=PromptBreakdown.model_validate_json(r["prompt_breakdown_json"]),
-                    tools_declared=json.loads(r["tools_declared_json"]) if r["tools_declared_json"] else [],
-                    tools_invoked=json.loads(r["tools_invoked_json"]) if r["tools_invoked_json"] else [],
-                    raw_usage=json.loads(r["raw_usage_json"]) if r["raw_usage_json"] else None
-                ))
+                events.append(
+                    TelemetryEvent(
+                        trace_id=r["trace_id"],
+                        correlation_id=r["correlation_id"],
+                        timestamp=r["timestamp"],
+                        node_id=r["node_id"],
+                        agent_id=r["agent_id"],
+                        task_type=r["task_type"],
+                        model=r["model"],
+                        streaming=bool(r["streaming"]),
+                        input_tokens=r["input_tokens"],
+                        output_tokens=r["output_tokens"],
+                        cached_read_tokens=r["cached_read_tokens"],
+                        cached_write_tokens=r["cached_write_tokens"],
+                        cost_usd=r["cost_usd"],
+                        latency_ms=r["latency_ms"],
+                        prompt_breakdown=PromptBreakdown.model_validate_json(r["prompt_breakdown_json"]),
+                        tools_declared=json.loads(r["tools_declared_json"]) if r["tools_declared_json"] else [],
+                        tools_invoked=json.loads(r["tools_invoked_json"]) if r["tools_invoked_json"] else [],
+                        raw_usage=json.loads(r["raw_usage_json"]) if r["raw_usage_json"] else None,
+                    )
+                )
             return events
 
-    def get_agent_metrics_summary(self) -> List[Dict[str, Any]]:
+    def get_agent_metrics_summary(self) -> list[dict[str, Any]]:
         query = """
             SELECT 
                 agent_id,
@@ -204,38 +215,46 @@ class SQLiteStorage:
             for r in rows:
                 inp = r["total_input_tokens"] or 0
                 cached = r["total_cached_tokens"] or 0
-                summaries.append({
-                    "agent_id": r["agent_id"],
-                    "invocation_count": r["invocation_count"],
-                    "total_spend_usd": round(r["total_spend_usd"] or 0.0, 6),
-                    "total_input_tokens": inp,
-                    "total_output_tokens": r["total_output_tokens"] or 0,
-                    "total_cached_tokens": cached,
-                    "cache_hit_ratio": round(cached / max(1, inp), 3),
-                    "avg_latency_ms": round(r["avg_latency_ms"] or 0.0, 1)
-                })
+                summaries.append(
+                    {
+                        "agent_id": r["agent_id"],
+                        "invocation_count": r["invocation_count"],
+                        "total_spend_usd": round(r["total_spend_usd"] or 0.0, 6),
+                        "total_input_tokens": inp,
+                        "total_output_tokens": r["total_output_tokens"] or 0,
+                        "total_cached_tokens": cached,
+                        "cache_hit_ratio": round(cached / max(1, inp), 3),
+                        "avg_latency_ms": round(r["avg_latency_ms"] or 0.0, 1),
+                    }
+                )
             return summaries
 
-    def save_advisory(self, advisory: AdvisoryMessage):
+    def save_advisory(self, advisory: AdvisoryMessage) -> None:
+        # Use a deterministic ID per (agent_id, advisory_type) so repeated advisories update in-place
+        # rather than flooding the table with duplicate rows on every turn.
+        deterministic_id = str(uuid.uuid5(uuid.NAMESPACE_OID, f"{advisory.agent_id}:{advisory.advisory_type}"))
         with self._get_connection() as conn:
-            conn.execute("""
+            conn.execute(
+                """
                 INSERT OR REPLACE INTO advisories VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                str(uuid.uuid4()),
-                time.time(),
-                advisory.advisory_type,
-                advisory.severity,
-                advisory.agent_id,
-                advisory.node_id,
-                advisory.summary,
-                advisory.estimated_savings_percent,
-                advisory.recommendation,
-                json.dumps(advisory.actionable_fix) if advisory.actionable_fix else None
-            ))
+            """,
+                (
+                    deterministic_id,
+                    time.time(),
+                    advisory.advisory_type,
+                    advisory.severity,
+                    advisory.agent_id,
+                    advisory.node_id,
+                    advisory.summary,
+                    advisory.estimated_savings_percent,
+                    advisory.recommendation,
+                    json.dumps(advisory.actionable_fix) if advisory.actionable_fix else None,
+                ),
+            )
 
-    def get_recent_advisories(self, limit: int = 50, agent_id: Optional[str] = None) -> List[AdvisoryMessage]:
+    def get_recent_advisories(self, limit: int = 50, agent_id: str | None = None) -> list[AdvisoryMessage]:
         query = "SELECT * FROM advisories"
-        params: List[Any] = []
+        params: list[Any] = []
         if agent_id:
             query += " WHERE agent_id = ?"
             params.append(agent_id)
@@ -248,33 +267,38 @@ class SQLiteStorage:
             rows = cursor.fetchall()
             advisories = []
             for r in rows:
-                advisories.append(AdvisoryMessage(
-                    advisory_type=r["advisory_type"],
-                    severity=r["severity"],
-                    agent_id=r["agent_id"],
-                    node_id=r["node_id"],
-                    summary=r["summary"],
-                    estimated_savings_percent=r["estimated_savings_percent"],
-                    recommendation=r["recommendation"],
-                    actionable_fix=json.loads(r["actionable_fix_json"]) if r["actionable_fix_json"] else None
-                ))
+                advisories.append(
+                    AdvisoryMessage(
+                        advisory_type=r["advisory_type"],
+                        severity=r["severity"],
+                        agent_id=r["agent_id"],
+                        node_id=r["node_id"],
+                        summary=r["summary"],
+                        estimated_savings_percent=r["estimated_savings_percent"],
+                        recommendation=r["recommendation"],
+                        actionable_fix=json.loads(r["actionable_fix_json"]) if r["actionable_fix_json"] else None,
+                    )
+                )
             return advisories
 
-    def record_heartbeat(self, heartbeat: NodeHeartbeat):
+    def record_heartbeat(self, heartbeat: NodeHeartbeat) -> None:
         with self._get_connection() as conn:
-            conn.execute("""
+            conn.execute(
+                """
                 INSERT OR REPLACE INTO node_heartbeats VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (
-                heartbeat.node_id,
-                heartbeat.timestamp,
-                heartbeat.status,
-                heartbeat.ip_address,
-                heartbeat.memory_mb,
-                heartbeat.backlog_events,
-                json.dumps(heartbeat.active_agents)
-            ))
+            """,
+                (
+                    heartbeat.node_id,
+                    heartbeat.timestamp,
+                    heartbeat.status,
+                    heartbeat.ip_address,
+                    heartbeat.memory_mb,
+                    heartbeat.backlog_events,
+                    json.dumps(heartbeat.active_agents),
+                ),
+            )
 
-    def get_node_statuses(self) -> List[Dict[str, Any]]:
+    def get_node_statuses(self) -> list[dict[str, Any]]:
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM node_heartbeats ORDER BY timestamp DESC")
@@ -283,24 +307,29 @@ class SQLiteStorage:
             nodes = []
             for r in rows:
                 is_stale = (now - r["timestamp"]) > 90.0
-                nodes.append({
-                    "node_id": r["node_id"],
-                    "last_seen_seconds_ago": round(now - r["timestamp"], 1),
-                    "status": "OFFLINE" if is_stale else r["status"],
-                    "ip_address": r["ip_address"],
-                    "memory_mb": r["memory_mb"],
-                    "backlog_events": r["backlog_events"],
-                    "active_agents": json.loads(r["active_agents_json"]) if r["active_agents_json"] else []
-                })
+                nodes.append(
+                    {
+                        "node_id": r["node_id"],
+                        "last_seen_seconds_ago": round(now - r["timestamp"], 1),
+                        "status": "OFFLINE" if is_stale else r["status"],
+                        "ip_address": r["ip_address"],
+                        "memory_mb": r["memory_mb"],
+                        "backlog_events": r["backlog_events"],
+                        "active_agents": json.loads(r["active_agents_json"]) if r["active_agents_json"] else [],
+                    }
+                )
             return nodes
 
-    def trip_circuit_breaker(self, circuit_key: str, reason: str):
+    def trip_circuit_breaker(self, circuit_key: str, reason: str) -> None:
         with self._get_connection() as conn:
-            conn.execute("""
+            conn.execute(
+                """
                 INSERT OR REPLACE INTO tripped_circuits VALUES (?, ?, ?)
-            """, (circuit_key, time.time(), reason))
+            """,
+                (circuit_key, time.time(), reason),
+            )
 
-    def is_circuit_tripped(self, circuit_key: str) -> Optional[Dict[str, Any]]:
+    def is_circuit_tripped(self, circuit_key: str) -> dict[str, Any] | None:
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM tripped_circuits WHERE circuit_key = ?", (circuit_key,))
@@ -309,10 +338,11 @@ class SQLiteStorage:
                 return {
                     "circuit_key": row["circuit_key"],
                     "tripped_at": row["tripped_at"],
-                    "reason": row["reason"]
+                    "reason": row["reason"],
                 }
             return None
 
-    def reset_circuit_breaker(self, circuit_key: str):
+    def reset_circuit_breaker(self, circuit_key: str) -> None:
         with self._get_connection() as conn:
             conn.execute("DELETE FROM tripped_circuits WHERE circuit_key = ?", (circuit_key,))
+

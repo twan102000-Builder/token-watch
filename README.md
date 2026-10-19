@@ -80,7 +80,10 @@ TOKENWATCH_API_KEY=your_secure_local_pre_shared_key
 ### 2. Starting the Central Hub
 
 ```bash
+# Via module or installed CLI entrypoint (automatically loads .env):
 python -m tokenwatch.hub --host 127.0.0.1 --port 9000
+# Or:
+tokenwatch-hub --host 127.0.0.1 --port 9000
 ```
 
 ### 3. Running a Node Sidecar
@@ -93,30 +96,52 @@ python -m tokenwatch.sidecar \
   --hub-url http://localhost:9000 \
   --node-id node_gpu_livingroom \
   --optimize-tools
+# Or:
+tokenwatch-sidecar --optimize-tools
 ```
 
 ### 4. Launching the Real-Time Terminal Dashboard
 
 ```bash
 python -m tokenwatch.cli dashboard --hub-url http://localhost:9000
+# Or:
+tokenwatch dashboard --hub-url http://localhost:9000
 ```
 
 ---
 
 ## 🛠️ Turnkey Deployment
 
-Pre-configured systemd unit files and Docker Compose are provided in [`deploy/`](file:///Users/anthonymachomefolder/Token%20Watch/deploy/):
+Pre-configured daemon and container definitions are provided in [`deploy/`](deploy/):
 
-* **Systemd Hub**: `deploy/systemd/tokenwatch-hub.service`
-* **Systemd Sidecar**: `deploy/systemd/tokenwatch-sidecar.service`
-* **Docker Compose**: `deploy/docker-compose.yml`
+### macOS (Apple Silicon / Launchd)
+```bash
+# Install and start launchd user agents (~/Library/LaunchAgents)
+./deploy/launchd/manage.sh install
+
+# Verify status & health endpoints
+./deploy/launchd/manage.sh status
+
+# Tail live output logs
+./deploy/launchd/manage.sh logs
+
+# Stop or uninstall services
+./deploy/launchd/manage.sh stop
+```
+
+### Linux (Systemd) & Docker
+* **Systemd Hub**: `deploy/systemd/tokenwatch-hub.service` (`sudo systemctl status tokenwatch-hub`)
+* **Systemd Sidecar**: `deploy/systemd/tokenwatch-sidecar.service` (`sudo systemctl status tokenwatch-sidecar`)
+* **Docker Compose**: `deploy/docker-compose.yml` (`docker compose -f deploy/docker-compose.yml ps`)
+
 
 ---
 
-## 🧪 Automated Tests
+## 🧪 Automated Tests & Linting
 
 ```bash
 pytest -v tests/test_tokenwatch.py
+ruff check .
 ```
 
 ---

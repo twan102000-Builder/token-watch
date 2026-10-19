@@ -1,11 +1,13 @@
-import os
-import json
 import logging
+import os
+
 import httpx
-from typing import Optional, Dict, Any
+
 from tokenwatch.models import AlertPayload
+from tokenwatch.security import load_dotenv_if_present
 
 logger = logging.getLogger("tokenwatch.alerts")
+
 
 class LocalAlertDispatcher:
     """
@@ -13,25 +15,29 @@ class LocalAlertDispatcher:
     - Home Assistant local webhook
     - Local logging
     """
-    def __init__(self, ha_webhook_url: Optional[str] = None):
+
+    def __init__(self, ha_webhook_url: str | None = None):
+        load_dotenv_if_present()
         self.ha_webhook_url = ha_webhook_url or os.environ.get("TOKENWATCH_HA_WEBHOOK_URL")
 
-    async def send_alert(self, alert: AlertPayload):
+    async def send_alert(self, alert: AlertPayload) -> None:
         logger.warning(f"[ALERT][{alert.severity}] {alert.title}: {alert.message}")
 
         # Post to Home Assistant local webhook if configured
-        if self.ha_webhook_url:
+        webhook_url = self.ha_webhook_url or os.environ.get("TOKENWATCH_HA_WEBHOOK_URL")
+        if webhook_url:
             try:
                 async with httpx.AsyncClient(timeout=4.0) as client:
                     await client.post(
-                        self.ha_webhook_url,
+                        webhook_url,
                         json={
                             "title": alert.title,
                             "message": alert.message,
                             "alert_type": alert.alert_type,
                             "severity": alert.severity,
-                            "details": alert.details or {}
-                        }
+                            "details": alert.details or {},
+                        },
                     )
-            except Exception as e:
+            except httpx.HTTPError as e:
                 logger.error(f"Failed to post alert to Home Assistant: {e}")
+

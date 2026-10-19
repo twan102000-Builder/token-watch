@@ -27,5 +27,21 @@ dev = [
     "ruff>=0.1.0"
 ]
 
+[project.scripts]
+tokenwatch = "tokenwatch.cli:main"
+tokenwatch-hub = "tokenwatch.hub:main"
+tokenwatch-sidecar = "tokenwatch.sidecar:main"
+
 [tool.setuptools.packages.find]
 where = ["."]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = [
+    "ignore:Using `httpx` with `starlette.testclient` is deprecated:DeprecationWarning",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
