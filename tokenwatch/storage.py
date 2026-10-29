@@ -38,7 +38,6 @@ class SQLiteStorage:
         else:
             conn = sqlite3.connect(self.db_path, timeout=10.0)
             conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA journal_mode = WAL;")
             conn.execute("PRAGMA synchronous = NORMAL;")
             try:
                 with conn:
@@ -48,6 +47,8 @@ class SQLiteStorage:
 
     def _init_schema(self) -> None:
         with self._get_connection() as conn:
+            if not self.is_memory:
+                conn.execute("PRAGMA journal_mode = WAL;")
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS telemetry_events (
                     trace_id TEXT PRIMARY KEY,
@@ -252,12 +253,24 @@ class SQLiteStorage:
                 ),
             )
 
-    def get_recent_advisories(self, limit: int = 50, agent_id: str | None = None) -> list[AdvisoryMessage]:
+    def get_recent_advisories(
+        self,
+        limit: int = 50,
+        agent_id: str | None = None,
+        max_age_seconds: float | None = None,
+    ) -> list[AdvisoryMessage]:
         query = "SELECT * FROM advisories"
         params: list[Any] = []
+        conditions = []
         if agent_id:
-            query += " WHERE agent_id = ?"
+            conditions.append("agent_id = ?")
             params.append(agent_id)
+        if max_age_seconds is not None:
+            min_timestamp = time.time() - max_age_seconds
+            conditions.append("timestamp >= ?")
+            params.append(min_timestamp)
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
         query += " ORDER BY timestamp DESC LIMIT ?"
         params.append(limit)
 

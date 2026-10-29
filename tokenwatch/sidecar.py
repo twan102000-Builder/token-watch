@@ -272,8 +272,20 @@ def create_sidecar_app(
             declared_tools = [t.get("function", {}).get("name", "") for t in body["tools"]]
             if optimize_tools or request.headers.get("X-Optimize-Tools", "false").lower() == "true":
                 messages = body.get("messages", [])
-                user_query = messages[-1].get("content", "") if messages else ""
-                kept, _pruned = tool_pruner.prune_tools(body["tools"], str(user_query))
+                user_query = ""
+                for m in reversed(messages):
+                    if m.get("role") == "user":
+                        c = m.get("content")
+                        if isinstance(c, str):
+                            user_query = c
+                        elif isinstance(c, list):
+                            user_query = " ".join(
+                                str(p.get("text", "")) for p in c if isinstance(p, dict)
+                            )
+                        elif c is not None:
+                            user_query = str(c)
+                        break
+                kept, _pruned = tool_pruner.prune_tools(body["tools"], user_query)
                 body["tools"] = kept
 
         # 4. Prompt Slot Decomposition (with secret redaction)
@@ -346,13 +358,17 @@ def create_sidecar_app(
                         fallback_output=estimated_out_tokens,
                     )
 
-                    cost = calculate_cost(
-                        model,
-                        inp_tok,
-                        out_tok,
-                        cached_read_tokens=cached_read,
-                        cached_write_tokens=cached_write,
-                    )
+                    if upstream_resp.status_code >= 400:
+                        out_tok = 0
+                        cost = 0.0
+                    else:
+                        cost = calculate_cost(
+                            model,
+                            inp_tok,
+                            out_tok,
+                            cached_read_tokens=cached_read,
+                            cached_write_tokens=cached_write,
+                        )
 
                     evt = TelemetryEvent(
                         timestamp=time.time(),
@@ -374,7 +390,7 @@ def create_sidecar_app(
                         tools_invoked=list(tools_invoked_set),
                         raw_usage=DataRedactor.sanitize_dict(raw_usage),
                     )
-                    await telemetry_queue.put(evt)
+                    telemetry_queue.put_nowait(evt)
 
             media_type = upstream_resp.headers.get("content-type", "text/event-stream")
             return StreamingResponse(stream_generator(), status_code=upstream_resp.status_code, media_type=media_type)
@@ -407,13 +423,17 @@ def create_sidecar_app(
             fallback_output=fallback_out,
         )
 
-        cost = calculate_cost(
-            model,
-            inp_tok,
-            out_tok,
-            cached_read_tokens=cached_read,
-            cached_write_tokens=cached_write,
-        )
+        if resp.status_code >= 400:
+            out_tok = 0
+            cost = 0.0
+        else:
+            cost = calculate_cost(
+                model,
+                inp_tok,
+                out_tok,
+                cached_read_tokens=cached_read,
+                cached_write_tokens=cached_write,
+            )
 
         evt = TelemetryEvent(
             timestamp=time.time(),
@@ -435,7 +455,7 @@ def create_sidecar_app(
             tools_invoked=tools_invoked,
             raw_usage=DataRedactor.sanitize_dict(raw_usage),
         )
-        await telemetry_queue.put(evt)
+        telemetry_queue.put_nowait(evt)
 
         media_type = resp.headers.get("content-type", "application/json")
         return Response(content=resp.content, status_code=resp.status_code, media_type=media_type)

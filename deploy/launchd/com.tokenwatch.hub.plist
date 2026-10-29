@@ -5,10 +5,10 @@
     <key>Label</key>
     <string>com.tokenwatch.hub</string>
     <key>WorkingDirectory</key>
-    <string>/Volumes/990_PRO/AntiGravity_Workspace/Token Watch</string>
+    <string>{{WORKSPACE_ROOT}}</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/Volumes/990_PRO/AntiGravity_Workspace/Token Watch/.venv/bin/python</string>
+        <string>{{PYTHON_BIN}}</string>
         <string>-m</string>
         <string>tokenwatch.hub</string>
         <string>--host</string>
@@ -19,15 +19,15 @@
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>/Volumes/990_PRO/AntiGravity_Workspace/Token Watch/.venv/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <string>{{PATH_ENV}}</string>
     </dict>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>/Volumes/990_PRO/AntiGravity_Workspace/Token Watch/data/tokenwatch-hub.log</string>
+    <string>{{WORKSPACE_ROOT}}/data/tokenwatch-hub.log</string>
     <key>StandardErrorPath</key>
-    <string>/Volumes/990_PRO/AntiGravity_Workspace/Token Watch/data/tokenwatch-hub.err.log</string>
+    <string>{{WORKSPACE_ROOT}}/data/tokenwatch-hub.err.log</string>
 </dict>
 </plist>

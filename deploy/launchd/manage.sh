@@ -34,9 +34,30 @@ usage() {
 }
 
 cmd_install() {
-    echo "[+] Installing Token Watch launchd plists into ${LAUNCH_AGENTS_DIR}..."
-    ln -sf "${HUB_PLIST_SRC}" "${HUB_PLIST_DEST}"
-    ln -sf "${SIDECAR_PLIST_SRC}" "${SIDECAR_PLIST_DEST}"
+    echo "[+] Configuring and installing Token Watch launchd plists into ${LAUNCH_AGENTS_DIR}..."
+
+    # Detect Python executable (prefer workspace .venv)
+    if [[ -f "${WORKSPACE_ROOT}/.venv/bin/python" ]]; then
+        PYTHON_BIN="${WORKSPACE_ROOT}/.venv/bin/python"
+        PATH_ENV="${WORKSPACE_ROOT}/.venv/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+    elif command -v python3 >/dev/null 2>&1; then
+        PYTHON_BIN="$(command -v python3)"
+        PATH_ENV="$(dirname "${PYTHON_BIN}"):/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+    else
+        PYTHON_BIN="/usr/bin/python3"
+        PATH_ENV="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+    fi
+
+    # Render templates directly into LaunchAgents destination
+    sed -e "s|{{WORKSPACE_ROOT}}|${WORKSPACE_ROOT}|g" \
+        -e "s|{{PYTHON_BIN}}|${PYTHON_BIN}|g" \
+        -e "s|{{PATH_ENV}}|${PATH_ENV}|g" \
+        "${HUB_PLIST_SRC}" > "${HUB_PLIST_DEST}"
+
+    sed -e "s|{{WORKSPACE_ROOT}}|${WORKSPACE_ROOT}|g" \
+        -e "s|{{PYTHON_BIN}}|${PYTHON_BIN}|g" \
+        -e "s|{{PATH_ENV}}|${PATH_ENV}|g" \
+        "${SIDECAR_PLIST_SRC}" > "${SIDECAR_PLIST_DEST}"
 
     cmd_start
     echo "[✓] Installation complete."

@@ -104,8 +104,9 @@ def reset_circuit_breaker(circuit_key: str) -> dict[str, str]:
 def list_recent_advisories(
     limit: int = Query(20, ge=1, le=100),
     agent_id: str | None = None,
+    max_age_seconds: float | None = Query(None, ge=1),
 ):
-    return storage.get_recent_advisories(limit=limit, agent_id=agent_id)
+    return storage.get_recent_advisories(limit=limit, agent_id=agent_id, max_age_seconds=max_age_seconds)
 
 
 @app.get("/api/v1/advisories/{agent_id}", response_model=list[AdvisoryMessage], dependencies=[Depends(verify_api_key)])

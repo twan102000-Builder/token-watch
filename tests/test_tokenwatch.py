@@ -434,3 +434,173 @@ def test_sidecar_interception_and_streaming(tmp_path, monkeypatch):
         assert "Hello world" in stream_resp.text
 
 
+def test_circuit_breaker_sliding_window_with_long_history():
+    import time
+    storage = SQLiteStorage(db_path=":memory:")
+    advisor = TokenAdvisorEngine(storage=storage)
+
+    base_time = time.time() - 3600  # Started 1 hour ago
+    corr_id = "corr-long-history"
+
+    # 10 older turns spread out over the past hour
+    for i in range(10):
+        storage.save_event(
+            TelemetryEvent(
+                trace_id=f"t-old-{i}",
+                correlation_id=corr_id,
+                timestamp=base_time + (i * 200),
+                node_id="node_edge",
+                agent_id="loop_agent",
+                model="gpt-4o-mini",
+                input_tokens=100,
+                output_tokens=20,
+                prompt_breakdown=PromptBreakdown(total_prompt_tokens=100),
+            )
+        )
+
+    # 4 sudden, rapid turns within 3 seconds
+    now = time.time()
+    for i in range(4):
+        storage.save_event(
+            TelemetryEvent(
+                trace_id=f"t-burst-{i}",
+                correlation_id=corr_id,
+                timestamp=now + i,
+                node_id="node_edge",
+                agent_id="loop_agent",
+                model="gpt-4o-mini",
+                input_tokens=100,
+                output_tokens=20,
+                prompt_breakdown=PromptBreakdown(total_prompt_tokens=100),
+            )
+        )
+
+    advisories = advisor.generate_advisories("loop_agent", persist=True, trip_circuits=True)
+    loop_adv = next((a for a in advisories if a.advisory_type == "LOOP_DETECTED"), None)
+    assert loop_adv is not None
+    assert storage.is_circuit_tripped(corr_id) is not None
+
+
+def test_local_gemma_and_cluster_models_pricing():
+    assert calculate_cost("gemma-4-31b", 100_000, 10_000) == 0.0
+    assert calculate_cost("gemma-4-12b", 50_000, 5_000) == 0.0
+    assert calculate_cost("gemma-4-9b", 50_000, 5_000) == 0.0
+    assert calculate_cost("embedding-gemma-2-740m", 100_000, 0) == 0.0
+    assert calculate_cost("ollama/gemma4:12b", 50_000, 2_000) == 0.0
+    assert calculate_cost("vllm/local-model", 50_000, 2_000) == 0.0
+    assert calculate_cost("mlx-community/gemma-4-12b-qat", 50_000, 2_000) == 0.0
+
+
+def test_tool_pruning_multi_turn_with_trailing_tool_response(tmp_path, monkeypatch):
+    from tokenwatch.security import API_KEY_HEADER_NAME, get_configured_api_key
+
+    spool_file = str(tmp_path / "sidecar_tool_test.db")
+    sidecar_app = create_sidecar_app(
+        upstream_url="http://mock-upstream.local/v1",
+        node_id="node_test",
+        optimize_tools=True,
+        spool_db_path=spool_file,
+    )
+
+    captured_requests = []
+
+    def mock_handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode("utf-8"))
+        captured_requests.append(body)
+        return httpx.Response(200, json={"choices": [{"message": {"role": "assistant", "content": "Done"}}]})
+
+    mock_transport = httpx.MockTransport(mock_handler)
+    api_key = get_configured_api_key()
+    base_headers = {API_KEY_HEADER_NAME: api_key} if api_key else {}
+
+    with TestClient(sidecar_app, headers=base_headers) as client:
+        for route in sidecar_app.routes:
+            if getattr(route, "path", "") == "/v1/chat/completions":
+                closure_vars = dict(
+                    zip(
+                        route.endpoint.__code__.co_freevars,
+                        [c.cell_contents for c in route.endpoint.__closure__],
+                        strict=False,
+                    )
+                )
+                upstream_client: httpx.AsyncClient = closure_vars["client"]
+                monkeypatch.setattr(upstream_client, "_transport", mock_transport)
+
+        # Multi-turn payload where last message is role: tool
+        client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "gpt-4o-mini",
+                "messages": [
+                    {"role": "user", "content": "Turn on the living room lamp"},
+                    {"role": "assistant", "content": None, "tool_calls": [{"id": "1", "function": {"name": "get_lamp"}}]},
+                    {"role": "tool", "content": '{"status": "ready"}'},
+                ],
+                "tools": [
+                    {"type": "function", "function": {"name": "turn_on_lamp", "description": "Turn on lamp and illumination"}},
+                    {"type": "function", "function": {"name": "water_garden", "description": "Water garden and plants"}},
+                    {"type": "function", "function": {"name": "garage_door", "description": "Open garage door"}},
+                    {"type": "function", "function": {"name": "set_alarm", "description": "Arm house security alarm"}},
+                ],
+            },
+        )
+
+        assert len(captured_requests) == 1
+        forwarded_tools = [t["function"]["name"] for t in captured_requests[0].get("tools", [])]
+        # Should correctly prune based on the user turn ('lamp'), keeping 'turn_on_lamp'
+        assert "turn_on_lamp" in forwarded_tools
+
+
+def test_decomposer_task_payload_with_trailing_tool_response():
+    decomposer = PromptSlotDecomposer()
+    payload = {
+        "messages": [
+            {"role": "system", "content": "You are a home assistant."},
+            {"role": "user", "content": "Please turn off the kitchen lights."},
+            {"role": "assistant", "content": None},
+            {"role": "tool", "content": '{"status": "success"}'},
+        ]
+    }
+    breakdown = decomposer.decompose(payload)
+    assert breakdown.task_payload > 0
+    assert breakdown.system_instructions > 0
+
+
+def test_advisories_max_age_filtering():
+    import time
+    storage = SQLiteStorage(db_path=":memory:")
+
+    # Stale advisory from 2 hours ago
+    stale_adv = AdvisoryMessage(
+        advisory_type="TOOL_PRUNING",
+        severity="WARNING",
+        agent_id="stale_agent",
+        node_id="n1",
+        summary="Old warning",
+        estimated_savings_percent=30.0,
+        recommendation="Fix it",
+    )
+    storage.save_advisory(stale_adv)
+    # Manually update timestamp to 2 hours ago
+    with storage._get_connection() as conn:
+        conn.execute("UPDATE advisories SET timestamp = ?", (time.time() - 7200,))
+
+    # Fresh advisory
+    fresh_adv = AdvisoryMessage(
+        advisory_type="CACHE_ALIGNMENT",
+        severity="INFO",
+        agent_id="fresh_agent",
+        node_id="n1",
+        summary="Recent advisory",
+        estimated_savings_percent=60.0,
+        recommendation="Stabilize prefix",
+    )
+    storage.save_advisory(fresh_adv)
+
+    # Filter with max_age_seconds = 3600 (1 hour)
+    recent = storage.get_recent_advisories(max_age_seconds=3600)
+    assert len(recent) == 1
+    assert recent[0].advisory_type == "CACHE_ALIGNMENT"
+
+
+

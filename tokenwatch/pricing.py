@@ -23,10 +23,18 @@ MODEL_PRICING: dict[str, tuple[float, float, float, float]] = {
     "deepseek-chat": (0.14, 0.28, 0.014, 0.14),
     "deepseek-r1": (0.55, 2.19, 0.14, 0.55),
 
-    # Local models (vLLM / Ollama)
+    # Local cluster & edge models (Gemma 4, EmbeddingGemma, Ollama, vLLM, MLX - 100% free)
+    "gemma-4": (0.00, 0.00, 0.00, 0.00),
+    "gemma-2": (0.00, 0.00, 0.00, 0.00),
+    "gemma": (0.00, 0.00, 0.00, 0.00),
+    "embedding-gemma": (0.00, 0.00, 0.00, 0.00),
+    "embeddinggemma": (0.00, 0.00, 0.00, 0.00),
     "local-llama-3.1-8b": (0.00, 0.00, 0.00, 0.00),
     "local-llama-3.3-70b": (0.00, 0.00, 0.00, 0.00),
     "local-qwen-2.5-7b": (0.00, 0.00, 0.00, 0.00),
+    "llama": (0.00, 0.00, 0.00, 0.00),
+    "qwen": (0.00, 0.00, 0.00, 0.00),
+    "mistral": (0.00, 0.00, 0.00, 0.00),
 }
 
 
@@ -40,16 +48,21 @@ def calculate_cost(
     """
     Calculates cost in USD for a completion call based on model pricing matrix.
     """
+    lower_model = model.lower()
+
+    # Fast-path for local cluster inferences (Ollama, vLLM, MLX, localhost)
+    if any(prefix in lower_model for prefix in ("local-", "ollama/", "vllm/", "mlx-", ":free", "localhost")):
+        return 0.0
+
     # Normalize model name matching (sort keys longest-first so 'gpt-4o-mini' matches before 'gpt-4o')
     matched_key = None
-    lower_model = model.lower()
     for key in sorted(MODEL_PRICING, key=len, reverse=True):
         if key in lower_model:
             matched_key = key
             break
 
     if not matched_key:
-        # Default fallback to gpt-4o-mini-style tier if unknown
+        # Default fallback to gpt-4o-mini-style tier if unknown cloud model
         inp_rate, out_rate, read_rate, write_rate = (0.50, 2.00, 0.25, 0.50)
     else:
         inp_rate, out_rate, read_rate, write_rate = MODEL_PRICING[matched_key]

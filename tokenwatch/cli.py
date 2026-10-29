@@ -42,7 +42,7 @@ def generate_dashboard(hub_url: str, api_key: str | None = None) -> Layout:
             events_resp = client.get(f"{hub_url.rstrip('/')}/api/v1/analytics/events?limit=8")
             events = events_resp.json() if events_resp.status_code == 200 else []
 
-            advisories_resp = client.get(f"{hub_url.rstrip('/')}/api/v1/advisories?limit=5")
+            advisories_resp = client.get(f"{hub_url.rstrip('/')}/api/v1/advisories?limit=5&max_age_seconds=3600")
             advisories = advisories_resp.json() if advisories_resp.status_code == 200 else []
     except (httpx.HTTPError, ValueError):
         summaries, nodes, events, advisories = [], [], [], []

@@ -52,7 +52,11 @@ class PromptSlotDecomposer:
 
         # 2. Iterate through messages
         messages: list[dict[str, Any]] = payload.get("messages", [])
-        total_msgs = len(messages)
+        last_user_idx = None
+        for i in range(len(messages) - 1, -1, -1):
+            if messages[i].get("role") == "user":
+                last_user_idx = i
+                break
 
         for idx, msg in enumerate(messages):
             role = msg.get("role", "")
@@ -64,8 +68,8 @@ class PromptSlotDecomposer:
 
             if role == "system":
                 breakdown.system_instructions += tokens
-            elif idx == total_msgs - 1 and role == "user":
-                # Final user message is the active task payload
+            elif idx == last_user_idx:
+                # Most recent user message is the active task payload
                 breakdown.task_payload += tokens
             else:
                 # Detect telemetry dumps or IoT sensor patterns

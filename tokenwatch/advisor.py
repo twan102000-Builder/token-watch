@@ -120,24 +120,25 @@ class TokenAdvisorEngine:
                             f"Agent '{agent_id}' uses tier-1 model ({latest.model}) "
                             f"for low-complexity turns (avg {int(avg_out)} tokens out)."
                         ),
-                        estimated_savings_percent=85.0,
+                        estimated_savings_percent=95.0,
                         recommendation=(
-                            "Route to fast tier model (e.g. 'gemini-2.5-flash' or local 'llama-3.1-8b') "
-                            "for 85%+ cost reduction."
+                            "Route to Tier 1 local model (e.g. 'gemma-4-12b' or 'gemma-4-9b' on cluster edge) "
+                            "for 100% cost reduction, or fast cloud tier ('gemini-2.5-flash')."
                         ),
-                        actionable_fix={"recommended_model": "gemini-2.5-flash"},
+                        actionable_fix={"recommended_model": "gemma-4-12b"},
                     )
                 )
 
-        # 5. Multi-Agent Ping-Pong Loop Detection & Active Circuit Trip
+        # 5. Multi-Agent Ping-Pong Loop Detection & Active Circuit Trip (4-turn sliding window)
         if latest.correlation_id:
             chain = self.storage.get_recent_events(limit=20, correlation_id=latest.correlation_id)
             if len(chain) >= 4:
-                time_span = abs(chain[0].timestamp - chain[-1].timestamp)
+                # Sliding window of the 4 most recent turns (chain is ordered timestamp DESC)
+                time_span = abs(chain[0].timestamp - chain[3].timestamp)
                 if time_span < 60.0:
                     trip_reason = (
-                        f"Rapid multi-agent chatter loop detected: {len(chain)} turns "
-                        f"in {round(time_span, 1)}s across correlation ID {latest.correlation_id}"
+                        f"Rapid multi-agent chatter loop detected: 4 turns in "
+                        f"{round(time_span, 1)}s across correlation ID {latest.correlation_id}"
                     )
                     if trip_circuits:
                         self.storage.trip_circuit_breaker(latest.correlation_id, trip_reason)
