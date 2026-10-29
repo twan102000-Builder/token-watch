@@ -91,14 +91,14 @@ cmd_status() {
     launchctl list | grep -E "com.tokenwatch" || echo "No active com.tokenwatch services registered in launchctl."
     echo ""
     echo "=== HTTP Endpoint Checks ==="
-    if curl -s -m 2 http://127.0.0.1:9000/ > /dev/null 2>&1; then
+    if curl -s -m 2 http://127.0.0.1:9000/health > /dev/null 2>&1; then
         echo "[✓] Hub (port 9000): ONLINE"
         curl -s http://127.0.0.1:9000/ | python3 -m json.tool 2>/dev/null || true
     else
         echo "[✗] Hub (port 9000): OFFLINE or unreachable"
     fi
 
-    if curl -s -m 2 http://127.0.0.1:8080/openapi.json > /dev/null 2>&1; then
+    if curl -s -m 2 http://127.0.0.1:8080/health > /dev/null 2>&1; then
         echo "[✓] Sidecar (port 8080): ONLINE"
     else
         echo "[✗] Sidecar (port 8080): OFFLINE or unreachable"

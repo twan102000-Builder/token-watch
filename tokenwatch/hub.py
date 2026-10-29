@@ -128,6 +128,17 @@ def get_recent_events(
     return storage.get_recent_events(limit=limit, agent_id=agent_id, correlation_id=correlation_id)
 
 
+@app.get("/health")
+def health() -> dict[str, str]:
+    return {"status": "ok", "service": "tokenwatch-hub"}
+
+
+@app.post("/api/v1/maintenance/prune", dependencies=[Depends(verify_api_key)])
+def prune_database(days: int = Query(30, ge=1, le=365)) -> dict[str, Any]:
+    deleted = storage.prune_old_events(days=days)
+    return {"status": "ok", "pruned_events": deleted, "retention_days": days}
+
+
 @app.get("/")
 def root():
     summary = storage.get_agent_metrics_summary()

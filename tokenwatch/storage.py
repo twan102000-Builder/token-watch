@@ -359,3 +359,15 @@ class SQLiteStorage:
         with self._get_connection() as conn:
             conn.execute("DELETE FROM tripped_circuits WHERE circuit_key = ?", (circuit_key,))
 
+    def prune_old_events(self, days: int = 30) -> int:
+        cutoff = time.time() - (days * 86400.0)
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM telemetry_events WHERE timestamp < ?", (cutoff,))
+            deleted = cursor.rowcount
+            cursor.execute("DELETE FROM advisories WHERE timestamp < ?", (cutoff,))
+            if not self.is_memory:
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+            return deleted
+
+

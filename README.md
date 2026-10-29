@@ -108,6 +108,17 @@ python -m tokenwatch.cli dashboard --hub-url http://localhost:9000
 tokenwatch dashboard --hub-url http://localhost:9000
 ```
 
+### 5. Maintenance & Database Pruning
+
+Keep embedded SQLite storage lean and performant across long-running home clusters:
+
+```bash
+# Prune telemetry older than 30 days and truncate WAL
+python -m tokenwatch.cli prune --days 30 --hub-url http://localhost:9000
+# Or:
+tokenwatch prune --days 30
+```
+
 ---
 
 ## 🛠️ Turnkey Deployment

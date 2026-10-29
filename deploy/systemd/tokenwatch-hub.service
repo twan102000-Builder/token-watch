@@ -7,7 +7,7 @@ Type=simple
 User=pi
 WorkingDirectory=/opt/token-watch
 EnvironmentFile=/opt/token-watch/.env
-ExecStart=/opt/token-watch/.venv/bin/python -m tokenwatch.hub --host 0.0.0.0 --port 9000
+ExecStart=/opt/token-watch/.venv/bin/python -m tokenwatch.hub
 Restart=always
 RestartSec=5s
 

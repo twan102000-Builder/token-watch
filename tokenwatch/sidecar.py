@@ -223,6 +223,21 @@ def create_sidecar_app(
 
     app = FastAPI(title=f"Token Watch Sidecar - {node_id}", lifespan=lifespan)
 
+    @app.get("/health")
+    def health() -> dict[str, str]:
+        return {"status": "ok", "service": "tokenwatch-sidecar", "node_id": node_id}
+
+    @app.get("/v1/models", dependencies=[Depends(verify_api_key)])
+    @app.get("/models", dependencies=[Depends(verify_api_key)])
+    async def list_models(request: Request) -> Response:
+        try:
+            resp = await client.get("/models")
+            return Response(content=resp.content, status_code=resp.status_code, media_type="application/json")
+        except (httpx.HTTPError, OSError):
+            fallback = json.dumps({"data": [{"id": "default-model", "object": "model"}]})
+            return Response(content=fallback, status_code=200, media_type="application/json")
+
+    @app.post("/chat/completions", dependencies=[Depends(verify_api_key)])
     @app.post("/v1/chat/completions", dependencies=[Depends(verify_api_key)])
     async def intercept_chat(request: Request):
         start_time = time.time()

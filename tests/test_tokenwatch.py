@@ -603,4 +603,111 @@ def test_advisories_max_age_filtering():
     assert recent[0].advisory_type == "CACHE_ALIGNMENT"
 
 
+def test_storage_and_hub_prune(monkeypatch):
+    import time
+
+    import tokenwatch.hub as hub_module
+    from tokenwatch.security import API_KEY_HEADER_NAME, get_configured_api_key
+
+    mem_storage = SQLiteStorage(db_path=":memory:")
+    monkeypatch.setattr(hub_module, "storage", mem_storage)
+
+    # Insert old event (40 days ago) and fresh event
+    now = time.time()
+    mem_storage.save_event(
+        TelemetryEvent(
+            trace_id="t-old",
+            timestamp=now - (40 * 86400),
+            node_id="n1",
+            agent_id="a1",
+            model="gpt-4o",
+            input_tokens=100,
+            output_tokens=10,
+            prompt_breakdown=PromptBreakdown(total_prompt_tokens=100),
+        )
+    )
+    mem_storage.save_event(
+        TelemetryEvent(
+            trace_id="t-fresh",
+            timestamp=now - (5 * 86400),
+            node_id="n1",
+            agent_id="a1",
+            model="gpt-4o",
+            input_tokens=100,
+            output_tokens=10,
+            prompt_breakdown=PromptBreakdown(total_prompt_tokens=100),
+        )
+    )
+
+    api_key = get_configured_api_key()
+    headers = {API_KEY_HEADER_NAME: api_key} if api_key else {}
+    client = TestClient(hub_module.app, headers=headers)
+
+    # 1. Health probe
+    health_resp = client.get("/health")
+    assert health_resp.status_code == 200
+    assert health_resp.json()["status"] == "ok"
+
+    # 2. Prune via Hub API (retention: 30 days)
+    prune_resp = client.post("/api/v1/maintenance/prune?days=30")
+    assert prune_resp.status_code == 200
+    assert prune_resp.json()["pruned_events"] == 1
+
+    remaining = mem_storage.get_recent_events()
+    assert len(remaining) == 1
+    assert remaining[0].trace_id == "t-fresh"
+
+
+def test_sidecar_health_models_and_alias(tmp_path, monkeypatch):
+    from tokenwatch.security import API_KEY_HEADER_NAME, get_configured_api_key
+
+    spool_file = str(tmp_path / "sidecar_extra_test.db")
+    sidecar_app = create_sidecar_app(
+        upstream_url="http://mock-upstream.local/v1",
+        node_id="test_node_discovery",
+        spool_db_path=spool_file,
+    )
+
+    def mock_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/models"):
+            return httpx.Response(200, json={"data": [{"id": "gemma-4-12b", "object": "model"}]})
+        return httpx.Response(200, json={"choices": [{"message": {"role": "assistant", "content": "OK"}}]})
+
+    mock_transport = httpx.MockTransport(mock_handler)
+    api_key = get_configured_api_key()
+    base_headers = {API_KEY_HEADER_NAME: api_key} if api_key else {}
+
+    with TestClient(sidecar_app, headers=base_headers) as client:
+        for route in sidecar_app.routes:
+            if getattr(route, "path", "") in ("/v1/chat/completions", "/v1/models"):
+                closure_vars = dict(
+                    zip(
+                        route.endpoint.__code__.co_freevars,
+                        [c.cell_contents for c in route.endpoint.__closure__],
+                        strict=False,
+                    )
+                )
+                upstream_client: httpx.AsyncClient = closure_vars["client"]
+                monkeypatch.setattr(upstream_client, "_transport", mock_transport)
+
+        # 1. Health check probe
+        h_resp = client.get("/health")
+        assert h_resp.status_code == 200
+        assert h_resp.json()["service"] == "tokenwatch-sidecar"
+
+        # 2. Models discovery
+        m_resp = client.get("/v1/models")
+        assert m_resp.status_code == 200
+        assert "data" in m_resp.json()
+
+        # 3. Direct /chat/completions alias without /v1 prefix
+        alias_resp = client.post(
+            "/chat/completions",
+            json={"model": "gemma-4-12b", "messages": [{"role": "user", "content": "Hi"}]},
+        )
+        assert alias_resp.status_code == 200
+        assert alias_resp.json()["choices"][0]["message"]["content"] == "OK"
+
+
+
 

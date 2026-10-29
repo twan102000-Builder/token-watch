@@ -143,6 +143,27 @@ def run_dashboard(hub_url: str, api_key: str | None = None) -> None:
             console.print("[yellow]Exiting Token Watch Dashboard.[/yellow]")
 
 
+def run_prune(hub_url: str, days: int, api_key: str | None = None) -> None:
+    headers = {}
+    key = api_key or get_configured_api_key()
+    if key:
+        headers[API_KEY_HEADER_NAME] = key
+
+    try:
+        with httpx.Client(timeout=10.0, headers=headers) as client:
+            resp = client.post(f"{hub_url.rstrip('/')}/api/v1/maintenance/prune?days={days}")
+            if resp.status_code == 200:
+                data = resp.json()
+                console.print(
+                    f"[green]✓ Pruning successful: Deleted {data.get('pruned_events', 0)} "
+                    f"records older than {days} days.[/green]"
+                )
+            else:
+                console.print(f"[red]✗ Pruning failed with HTTP {resp.status_code}: {resp.text}[/red]")
+    except (httpx.HTTPError, OSError, ValueError) as exc:
+        console.print(f"[red]✗ Failed to connect to Token Watch Hub: {exc}[/red]")
+
+
 def main() -> None:
     load_dotenv_if_present()
     default_hub_host = os.environ.get("TOKENWATCH_HUB_HOST", "localhost")
@@ -156,9 +177,16 @@ def main() -> None:
     dash_parser.add_argument("--hub-url", type=str, default=default_hub_url)
     dash_parser.add_argument("--api-key", type=str, default=None)
 
+    prune_parser = subparsers.add_parser("prune", help="Prune historical telemetry older than N days")
+    prune_parser.add_argument("--days", type=int, default=30, help="Retention period in days (default: 30)")
+    prune_parser.add_argument("--hub-url", type=str, default=default_hub_url)
+    prune_parser.add_argument("--api-key", type=str, default=None)
+
     args = parser.parse_args()
     if args.command == "dashboard":
         run_dashboard(args.hub_url, args.api_key)
+    elif args.command == "prune":
+        run_prune(args.hub_url, args.days, args.api_key)
     else:
         parser.print_help()
 
