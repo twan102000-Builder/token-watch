@@ -7,6 +7,7 @@ name = "token-watch"
 version = "0.1.0"
 description = "Active token monitoring and reduction advisement system for multinode multi-agent networks"
 readme = "README.md"
+license = { text = "MIT" }
 authors = [
     { name = "Token Watch Contributors" }
 ]
@@ -37,7 +38,8 @@ where = ["."]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 filterwarnings = [
-    "ignore:Using `httpx` with `starlette.testclient` is deprecated:DeprecationWarning",
+    "ignore:Using `httpx` with `starlette.testclient` is deprecated.*:DeprecationWarning",
+    "ignore:.*starlette.testclient.*:Warning",
 ]
 
 [tool.ruff]

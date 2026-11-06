@@ -41,7 +41,14 @@ ENV/
 
 # Data & Logs
 data/
+*.db
+*.db-wal
+*.db-shm
 *.duckdb
 *.sqlite3
 *.log
 logs/
+
+# Testing & Linting Caches
+.pytest_cache/
+.ruff_cache/

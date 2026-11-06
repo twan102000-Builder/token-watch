@@ -100,7 +100,7 @@ class TokenAdvisorEngine:
                         "Enable Telemetry Compactor: pass entity state changes (diffs) "
                         "instead of repeated static entity tables."
                     ),
-                    actionable_fix={"action": "enable_telemetry_diffs"},
+                    actionable_fix={"action": "enable_telemetry_diffs", "header": "X-Compact-Telemetry: true"},
                 )
             )
 

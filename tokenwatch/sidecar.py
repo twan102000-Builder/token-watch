@@ -17,7 +17,7 @@ from starlette.responses import StreamingResponse
 
 from tokenwatch.decomposer import PromptSlotDecomposer
 from tokenwatch.models import NodeHeartbeat, TelemetryEvent
-from tokenwatch.optimizer import DynamicToolPruner, PrefixCacheStabilizer
+from tokenwatch.optimizer import DynamicToolPruner, PrefixCacheStabilizer, TelemetryCompactor
 from tokenwatch.pricing import calculate_cost
 from tokenwatch.security import (
     API_KEY_HEADER_NAME,
@@ -124,11 +124,13 @@ def create_sidecar_app(
     node_id: str,
     hub_url: str | None = None,
     optimize_tools: bool = False,
+    compact_telemetry: bool = False,
     spool_db_path: str | None = None,
 ) -> FastAPI:
     load_dotenv_if_present()
     decomposer = PromptSlotDecomposer()
     tool_pruner = DynamicToolPruner()
+    telemetry_compactor = TelemetryCompactor()
     telemetry_buffer = LocalTelemetryBuffer(db_path=spool_db_path)
     telemetry_queue: asyncio.Queue[TelemetryEvent] = asyncio.Queue()
     active_agents_set: set[str] = set()
@@ -224,8 +226,9 @@ def create_sidecar_app(
     app = FastAPI(title=f"Token Watch Sidecar - {node_id}", lifespan=lifespan)
 
     @app.get("/health")
+    @app.get("/")
     def health() -> dict[str, str]:
-        return {"status": "ok", "service": "tokenwatch-sidecar", "node_id": node_id}
+        return {"status": "ok", "service": "tokenwatch-sidecar", "node_id": node_id, "upstream_url": upstream_url}
 
     @app.get("/v1/models", dependencies=[Depends(verify_api_key)])
     @app.get("/models", dependencies=[Depends(verify_api_key)])
@@ -281,10 +284,13 @@ def create_sidecar_app(
         if request.headers.get("X-Stabilize-Prefix", "false").lower() == "true":
             body = PrefixCacheStabilizer.stabilize_payload(body)
 
-        # 3. Active Optimization: Dynamic Tool Pruning
+        # 3. Active Optimization: Telemetry Compaction (Diffs for IoT sensor payloads)
+        if compact_telemetry or request.headers.get("X-Compact-Telemetry", "false").lower() == "true":
+            body = telemetry_compactor.compact_payload(body)
+
+        # 4. Active Optimization: Dynamic Tool Pruning
         declared_tools = []
         if "tools" in body and isinstance(body["tools"], list):
-            declared_tools = [t.get("function", {}).get("name", "") for t in body["tools"]]
             if optimize_tools or request.headers.get("X-Optimize-Tools", "false").lower() == "true":
                 messages = body.get("messages", [])
                 user_query = ""
@@ -302,8 +308,9 @@ def create_sidecar_app(
                         break
                 kept, _pruned = tool_pruner.prune_tools(body["tools"], user_query)
                 body["tools"] = kept
+            declared_tools = [t.get("function", {}).get("name", "") for t in body["tools"]]
 
-        # 4. Prompt Slot Decomposition (with secret redaction)
+        # 5. Prompt Slot Decomposition (with secret redaction)
         breakdown = decomposer.decompose(body, redact_secrets=True)
 
         # Forward headers upstream (strip host, internal auth, and hop-by-hop headers)
@@ -329,33 +336,45 @@ def create_sidecar_app(
                 sse_event_chunks = 0
                 tools_invoked_set: set[str] = set()
                 raw_usage: dict[str, Any] | None = None
+                line_buffer = ""
+
+                def _process_sse_line(line: str) -> None:
+                    nonlocal sse_event_chunks, raw_usage
+                    line = line.strip("\r")
+                    if not line.startswith("data: ") or line == "data: [DONE]":
+                        return
+                    sse_event_chunks += 1
+                    try:
+                        data = json.loads(line[6:])
+                        if data.get("usage"):
+                            raw_usage = data["usage"]
+                        choices = data.get("choices", [])
+                        if choices:
+                            delta = choices[0].get("delta", {})
+                            content_piece = delta.get("content")
+                            if content_piece:
+                                streamed_text_parts.append(str(content_piece))
+                            if delta.get("tool_calls"):
+                                for tc in delta["tool_calls"]:
+                                    fn = tc.get("function", {})
+                                    if fn.get("name"):
+                                        tools_invoked_set.add(fn["name"])
+                                    if fn.get("arguments"):
+                                        streamed_text_parts.append(str(fn["arguments"]))
+                    except (json.JSONDecodeError, TypeError, KeyError):
+                        pass
 
                 try:
                     async for chunk in upstream_resp.aiter_bytes():
                         chunk_text = chunk.decode("utf-8", errors="ignore")
-                        for line in chunk_text.splitlines():
-                            if line.startswith("data: ") and line != "data: [DONE]":
-                                sse_event_chunks += 1
-                                try:
-                                    data = json.loads(line[6:])
-                                    if data.get("usage"):
-                                        raw_usage = data["usage"]
-                                    choices = data.get("choices", [])
-                                    if choices:
-                                        delta = choices[0].get("delta", {})
-                                        content_piece = delta.get("content")
-                                        if content_piece:
-                                            streamed_text_parts.append(str(content_piece))
-                                        if delta.get("tool_calls"):
-                                            for tc in delta["tool_calls"]:
-                                                fn = tc.get("function", {})
-                                                if fn.get("name"):
-                                                    tools_invoked_set.add(fn["name"])
-                                                if fn.get("arguments"):
-                                                    streamed_text_parts.append(str(fn["arguments"]))
-                                except (json.JSONDecodeError, TypeError, KeyError):
-                                    pass
+                        combined = line_buffer + chunk_text
+                        lines = combined.split("\n")
+                        line_buffer = lines[-1]
+                        for line in lines[:-1]:
+                            _process_sse_line(line)
                         yield chunk
+                    if line_buffer:
+                        _process_sse_line(line_buffer)
                 finally:
                     await upstream_resp.aclose()
                     latency_ms = (time.time() - start_time) * 1000.0
@@ -488,6 +507,7 @@ def main() -> None:
     default_hub_url = os.environ.get("TOKENWATCH_HUB_URL", f"http://{default_hub_host}:{default_hub_port}")
     default_node_id = os.environ.get("TOKENWATCH_NODE_ID", "node_edge_1")
     default_opt_tools = os.environ.get("TOKENWATCH_OPTIMIZE_TOOLS", "false").lower() in ("true", "1", "yes")
+    default_compact = os.environ.get("TOKENWATCH_COMPACT_TELEMETRY", "false").lower() in ("true", "1", "yes")
 
     parser = argparse.ArgumentParser(description="Token Watch Sidecar Proxy")
     parser.add_argument("--port", type=int, default=default_port)
@@ -501,6 +521,12 @@ def main() -> None:
         default=default_opt_tools,
         help="Enable dynamic tool pruning",
     )
+    parser.add_argument(
+        "--compact-telemetry",
+        action="store_true",
+        default=default_compact,
+        help="Enable IoT telemetry state diff compaction",
+    )
     args = parser.parse_args()
 
     import uvicorn
@@ -510,6 +536,7 @@ def main() -> None:
         node_id=args.node_id,
         hub_url=args.hub_url,
         optimize_tools=args.optimize_tools,
+        compact_telemetry=args.compact_telemetry,
     )
     uvicorn.run(app, host=args.host, port=args.port)
 

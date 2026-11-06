@@ -1,3 +1,4 @@
+import json
 import re
 from typing import Any
 
@@ -101,4 +102,32 @@ class TelemetryCompactor:
         if not diffs:
             return {"status": "all_states_unchanged", "entity_count": len(current_states)}
         return diffs
+
+    def compact_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """
+        Inspects payload messages for structured state dictionaries or JSON telemetry strings
+        and replaces unchanged state attributes with state-change diffs.
+        """
+        messages = payload.get("messages", [])
+        if not messages:
+            return payload
+
+        for msg in messages:
+            content = msg.get("content")
+            if isinstance(content, dict):
+                msg["content"] = self.compact_state_dict(content)
+            elif isinstance(content, str):
+                stripped = content.strip()
+                if stripped.startswith("{") and stripped.endswith("}"):
+                    try:
+                        parsed = json.loads(stripped)
+                        if isinstance(parsed, dict) and len(parsed) >= 2:
+                            diff = self.compact_state_dict(parsed)
+                            msg["content"] = json.dumps(diff)
+                    except (json.JSONDecodeError, ValueError):
+                        pass
+        return payload
+
+    def reset(self) -> None:
+        self._last_states.clear()
 

@@ -62,7 +62,7 @@ Token Watch is designed to be **100% Free, Private, Offline-Capable, and Self-Co
 git clone https://github.com/twan102000-Builder/token-watch.git
 cd token-watch
 
-# Install dependencies (only FastAPI, Uvicorn, httpx, pydantic, rich)
+# Install dependencies (FastAPI, Uvicorn, httpx, pydantic, rich, tiktoken)
 pip install -e .
 ```
 
@@ -89,15 +89,16 @@ tokenwatch-hub --host 127.0.0.1 --port 9000
 ### 3. Running a Node Sidecar
 
 ```bash
-# Intercepts requests on port 8080 and forwards to upstream target with active tool pruning enabled
+# Intercepts requests on port 8080 and forwards to upstream target with active optimizations enabled
 python -m tokenwatch.sidecar \
   --port 8080 \
   --upstream http://localhost:11434/v1 \
   --hub-url http://localhost:9000 \
   --node-id node_gpu_livingroom \
-  --optimize-tools
+  --optimize-tools \
+  --compact-telemetry
 # Or:
-tokenwatch-sidecar --optimize-tools
+tokenwatch-sidecar --optimize-tools --compact-telemetry
 ```
 
 ### 4. Launching the Real-Time Terminal Dashboard
@@ -159,4 +160,4 @@ ruff check .
 
 ## 📄 License
 
-MIT
+[MIT](LICENSE)

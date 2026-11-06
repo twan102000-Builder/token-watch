@@ -121,6 +121,23 @@ def test_telemetry_compactor():
     diff3 = compactor.compact_state_dict({"temp": 73, "humidity": 45})
     assert diff3 == {"temp": 73}
 
+    # Test payload compaction
+    payload1 = {
+        "messages": [
+            {"role": "user", "content": json.dumps({"sensor_a": 10, "sensor_b": 20})},
+        ]
+    }
+    p_diff1 = compactor.compact_payload(payload1)
+    assert json.loads(p_diff1["messages"][0]["content"]) == {"sensor_a": 10, "sensor_b": 20}
+
+    payload2 = {
+        "messages": [
+            {"role": "user", "content": json.dumps({"sensor_a": 10, "sensor_b": 20})},
+        ]
+    }
+    p_diff2 = compactor.compact_payload(payload2)
+    assert json.loads(p_diff2["messages"][0]["content"]) == {"status": "all_states_unchanged", "entity_count": 2}
+
 
 def test_sqlite_storage_and_advisor():
     storage = SQLiteStorage(db_path=":memory:")
@@ -547,7 +564,6 @@ def test_tool_pruning_multi_turn_with_trailing_tool_response(tmp_path, monkeypat
 
         assert len(captured_requests) == 1
         forwarded_tools = [t["function"]["name"] for t in captured_requests[0].get("tools", [])]
-        # Should correctly prune based on the user turn ('lamp'), keeping 'turn_on_lamp'
         assert "turn_on_lamp" in forwarded_tools
 
 
@@ -568,9 +584,9 @@ def test_decomposer_task_payload_with_trailing_tool_response():
 
 def test_advisories_max_age_filtering():
     import time
+
     storage = SQLiteStorage(db_path=":memory:")
 
-    # Stale advisory from 2 hours ago
     stale_adv = AdvisoryMessage(
         advisory_type="TOOL_PRUNING",
         severity="WARNING",
@@ -581,11 +597,9 @@ def test_advisories_max_age_filtering():
         recommendation="Fix it",
     )
     storage.save_advisory(stale_adv)
-    # Manually update timestamp to 2 hours ago
     with storage._get_connection() as conn:
         conn.execute("UPDATE advisories SET timestamp = ?", (time.time() - 7200,))
 
-    # Fresh advisory
     fresh_adv = AdvisoryMessage(
         advisory_type="CACHE_ALIGNMENT",
         severity="INFO",
@@ -597,7 +611,6 @@ def test_advisories_max_age_filtering():
     )
     storage.save_advisory(fresh_adv)
 
-    # Filter with max_age_seconds = 3600 (1 hour)
     recent = storage.get_recent_advisories(max_age_seconds=3600)
     assert len(recent) == 1
     assert recent[0].advisory_type == "CACHE_ALIGNMENT"
@@ -612,7 +625,6 @@ def test_storage_and_hub_prune(monkeypatch):
     mem_storage = SQLiteStorage(db_path=":memory:")
     monkeypatch.setattr(hub_module, "storage", mem_storage)
 
-    # Insert old event (40 days ago) and fresh event
     now = time.time()
     mem_storage.save_event(
         TelemetryEvent(
@@ -643,12 +655,10 @@ def test_storage_and_hub_prune(monkeypatch):
     headers = {API_KEY_HEADER_NAME: api_key} if api_key else {}
     client = TestClient(hub_module.app, headers=headers)
 
-    # 1. Health probe
     health_resp = client.get("/health")
     assert health_resp.status_code == 200
     assert health_resp.json()["status"] == "ok"
 
-    # 2. Prune via Hub API (retention: 30 days)
     prune_resp = client.post("/api/v1/maintenance/prune?days=30")
     assert prune_resp.status_code == 200
     assert prune_resp.json()["pruned_events"] == 1
@@ -690,17 +700,14 @@ def test_sidecar_health_models_and_alias(tmp_path, monkeypatch):
                 upstream_client: httpx.AsyncClient = closure_vars["client"]
                 monkeypatch.setattr(upstream_client, "_transport", mock_transport)
 
-        # 1. Health check probe
         h_resp = client.get("/health")
         assert h_resp.status_code == 200
         assert h_resp.json()["service"] == "tokenwatch-sidecar"
 
-        # 2. Models discovery
         m_resp = client.get("/v1/models")
         assert m_resp.status_code == 200
         assert "data" in m_resp.json()
 
-        # 3. Direct /chat/completions alias without /v1 prefix
         alias_resp = client.post(
             "/chat/completions",
             json={"model": "gemma-4-12b", "messages": [{"role": "user", "content": "Hi"}]},
@@ -709,5 +716,56 @@ def test_sidecar_health_models_and_alias(tmp_path, monkeypatch):
         assert alias_resp.json()["choices"][0]["message"]["content"] == "OK"
 
 
+def test_sidecar_sse_chunk_fragmentation(tmp_path, monkeypatch):
+    from tokenwatch.security import API_KEY_HEADER_NAME, get_configured_api_key
 
+    spool_file = str(tmp_path / "sidecar_frag_spool.db")
+    sidecar_app = create_sidecar_app(
+        upstream_url="http://mock-upstream-frag.local/v1",
+        node_id="node_frag",
+        hub_url=None,
+        spool_db_path=spool_file,
+    )
+
+    part1 = b'data: {"choices":[{"delta":{"content":"Hel'
+    part2 = b'lo '
+    part3 = b'chunk"}'
+    part4 = b']}\n\ndata: [DONE]\n\n'
+
+    def mock_frag_handler(request: httpx.Request) -> httpx.Response:
+        async def byte_stream():
+            yield part1
+            yield part2
+            yield part3
+            yield part4
+
+        return httpx.Response(
+            200,
+            content=byte_stream(),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    mock_transport = httpx.MockTransport(mock_frag_handler)
+    api_key = get_configured_api_key()
+    headers = {API_KEY_HEADER_NAME: api_key} if api_key else {}
+
+    with TestClient(sidecar_app, headers=headers) as client:
+        for route in sidecar_app.routes:
+            if getattr(route, "path", "") == "/v1/chat/completions":
+                closure_vars = dict(
+                    zip(
+                        route.endpoint.__code__.co_freevars,
+                        [c.cell_contents for c in route.endpoint.__closure__],
+                        strict=False,
+                    )
+                )
+                upstream_client: httpx.AsyncClient = closure_vars["client"]
+                monkeypatch.setattr(upstream_client, "_transport", mock_transport)
+
+        resp = client.post(
+            "/v1/chat/completions",
+            json={"model": "gpt-4o", "stream": True, "messages": [{"role": "user", "content": "hi"}]},
+        )
+        assert resp.status_code == 200
+        assert "Hello chunk" in resp.text
 
